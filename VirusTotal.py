@@ -1,3 +1,7 @@
+# Author TG: @monkvy
+# Version: 1.0.0
+# Description: VirusTotal integration module for Hikka
+
 import asyncio
 import logging
 import os
