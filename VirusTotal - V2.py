@@ -1,5 +1,6 @@
 # Author TG: @monkvy
 # Version: 2.0.0
+# https://github.com/monkvy/VirusTotal-hikka-bot
 # Description: VirusTotal integration module for Hikka
 
 import asyncio
