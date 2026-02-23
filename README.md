@@ -5,7 +5,7 @@
 
 ## 📥 Установка
 
-.dlm 
+.dlm https://raw.githubusercontent.com/monkvy/VirusTotal-hikka-bot/refs/heads/main/VirusTotal%20-%20V2.py
 
 ## 💻 Команды
 
