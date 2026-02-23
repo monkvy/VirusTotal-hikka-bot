@@ -1,6 +1,6 @@
 # VirusTotal Hikka Bot
 
-Автор: @monkwy  
+Автор: @monkvy  
 Версия: 1.0.0
 
 ## Команды
