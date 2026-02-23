@@ -1,5 +1,5 @@
-# Author TH: @monkvy
-# Version: 1.0.0
+# Author TG: @monkvy
+# Version: 2.0.0
 # Description: VirusTotal integration module for Hikka
 
 import asyncio
@@ -33,7 +33,7 @@ class VirusTotalMod(loader.Module):
         "uploading": "Загружаю на VirusTotal...",
         "scanning_url": "Сканирую ссылку...",
         "scanning": "Сканирование начато",
-        "waiting": "Жду анализа",
+        "waiting": "Жду анализа...",
         "no_key": "<b>Укажите API ключ в конфиге</b>",
         "error": "Ошибка при сканировании",
         "size_limit": "<b>Файл больше 32МБ</b>",
@@ -327,6 +327,9 @@ class VirusTotalMod(loader.Module):
             'forbidden': "<emoji document_id=5240241223632954241>🚫</emoji>",
             'trash': "<emoji document_id=5445267414562389170>🗑</emoji>",
             'history_empty': "<emoji document_id=5352896944496728039>📭</emoji>",
+            'downloading': "<emoji document_id=5433653135799228968>📥</emoji>",
+            'waiting': "<emoji document_id=5386367538735104399>⏳</emoji>",
+            'timeout': "<emoji document_id=5382194935057372936>⏰</emoji>",
         }
         return emojis.get(name, "")
 
@@ -364,6 +367,9 @@ class VirusTotalMod(loader.Module):
             'flag_gb': "🇬🇧",
             'back_arrow': "↩️",
             'cancel': "🚫",
+            'downloading': "📥",
+            'waiting': "⏳",
+            'timeout': "⏰",
         }
         return emojis.get(name, "")
 
@@ -437,42 +443,6 @@ class VirusTotalMod(loader.Module):
             return premium_warning, f"{premium_warning} <code>{suspicious}/{total} {self.get_string('suspicious')}</code>"
         else:
             return premium_success, f"{premium_success} <code>{total} {self.get_string('engines')}</code>"
-
-    def _get_progress_bar(self, percentage, width=10):
-        percentage = max(0, min(100, percentage))
-        filled = int(width * percentage / 100)
-        empty = width - filled
-        return "▰" * filled + "▱" * empty
-
-    async def _get_progress_message(self, start_time, progress_percentage, filename=None, url=None, file_size=None, scan_type="file", stage_text="", info_text=""):
-        elapsed = int(time.time() - start_time)
-        progress_bar = self._get_progress_bar(progress_percentage)
-        
-        lines = [
-            f"<b>{self._get_premium_emoji('shield')} {self.get_string('scan_title')}</b>",
-            f"━━━━━━━━━━━━━━━━━━━━━━"
-        ]
-        
-        if scan_type == "file" and filename:
-            display_name = f"{filename[:30]}{'...' if len(filename) > 30 else ''}"
-            lines.append(f"{self._get_premium_emoji('file')} <b>{self.get_string('file')}:</b> <code>{display_name}</code>")
-            if file_size is not None:
-                lines.append(f"{self._get_premium_emoji('size')} <b>{'Размер' if self._current_language == 'ru' else 'Size'}:</b> <code>{self._format_size(file_size)}</code>")
-        elif scan_type == "url" and url:
-            display_url = url[:40] + "..." if len(url) > 40 else url
-            lines.append(f"{self._get_premium_emoji('url')} <b>{self.get_string('url')}:</b> <code>{display_url}</code>")
-        
-        lines.append("")
-        lines.append(f"{self._get_premium_emoji('progress')} <b>{'Прогресс' if self._current_language == 'ru' else 'Progress'}:</b> <code>{progress_bar} {progress_percentage}%</code>")
-        lines.append(f"{self._get_premium_emoji('time')} <b>{'Время' if self._current_language == 'ru' else 'Time'}:</b> <code>{self._format_time(elapsed)}</code>")
-        
-        if stage_text:
-            lines.append(f"{self._get_premium_emoji('refresh')} {stage_text}")
-        
-        if info_text:
-            lines.append(f"{self._get_premium_emoji('stats')} {info_text}")
-        
-        return "\n".join(lines)
 
     def _save_to_history(self, item_id, result, scan_type, name=None, url=None, stats=None):
         if not self.config["save_history"]:
@@ -1021,7 +991,7 @@ class VirusTotalMod(loader.Module):
     async def _handle_scan_common(self, message, scan_type, **kwargs):
         api_key = self.config["api_key"]
         if not api_key:
-            return await utils.answer(message, f"{self._get_premium_emoji('forbidden')} {self.get_string('no_key')}")
+            return await utils.answer(message, f"{self._get_premium_emoji('forbidden')} <b>{self.get_string('no_key')}</b>")
         
         msg = None
         try:
@@ -1030,19 +1000,11 @@ class VirusTotalMod(loader.Module):
             if scan_type == "file":
                 reply = await message.get_reply_message()
                 if not reply or not reply.document:
-                    return await utils.answer(message, f"{self._get_premium_emoji('forbidden')} {self.get_string('no_file')}")
+                    return await utils.answer(message, f"{self._get_premium_emoji('forbidden')} <b>{self.get_string('no_file')}</b>")
                 
                 filename = reply.file.name or "file.bin"
                 
-                stage1_msg = await self._get_progress_message(
-                    start_time=start_time, 
-                    progress_percentage=10, 
-                    filename=filename, 
-                    scan_type="file",
-                    stage_text=f"{self._get_premium_emoji('upload')} <b>{self.get_string('uploading_file')}</b>",
-                    info_text=f"<b>{self.get_string('downloading')}</b>"
-                )
-                msg = await utils.answer(message, stage1_msg)
+                msg = await utils.answer(message, f"<b>{self._get_premium_emoji('downloading')} {self.get_string('downloading')}</b>")
                 msg_id = id(msg)
                 
                 session = self._get_session()
@@ -1053,44 +1015,16 @@ class VirusTotalMod(loader.Module):
                     
                     file_size = os.path.getsize(file_path)
                     if file_size > self.MAX_SIZE:
-                        error_msg = await self._get_progress_message(
-                            start_time=start_time, 
-                            progress_percentage=100, 
-                            filename=filename, 
-                            file_size=file_size, 
-                            scan_type="file",
-                            stage_text=f"{self._get_premium_emoji('error')} <b>{self.get_string('error_title')}</b>",
-                            info_text=f"{self._get_premium_emoji('forbidden')} {self.get_string('size_limit')} (<b>{self._format_size(file_size)}</b> > <b>{self._format_size(self.MAX_SIZE)}</b>)"
-                        )
-                        await self._safe_edit(msg, error_msg, msg_id)
+                        await self._safe_edit(msg, f"<b>{self._get_premium_emoji('forbidden')} {self.get_string('size_limit')}</b>", msg_id)
                         return
                     
                     file_hash = self._calculate_file_hash(file_path)
                     
-                    stage2_msg = await self._get_progress_message(
-                        start_time=start_time, 
-                        progress_percentage=50, 
-                        filename=filename, 
-                        file_size=file_size, 
-                        scan_type="file",
-                        stage_text=f"{self._get_premium_emoji('check')} <b>{self.get_string('checking_cache')}</b>",
-                        info_text=f"<b>{self.get_string('uploading')}</b>"
-                    )
-                    await self._safe_edit(msg, stage2_msg, msg_id)
+                    await self._safe_edit(msg, f"<b>{self._get_premium_emoji('check')} {self.get_string('checking_cache')}</b>", msg_id)
                     
                     existing_report = await self._check_existing_report(session, file_hash)
                     if existing_report:
-                        elapsed = int(time.time() - start_time)
-                        stage3_msg = await self._get_progress_message(
-                            start_time=start_time, 
-                            progress_percentage=95, 
-                            filename=filename, 
-                            file_size=file_size, 
-                            scan_type="file",
-                            stage_text=f"{self._get_premium_emoji('success')} <b>{self.get_string('completing')}</b>",
-                            info_text=f"<b>{self.get_string('getting_results')}</b>"
-                        )
-                        await self._safe_edit(msg, stage3_msg, msg_id)
+                        await self._safe_edit(msg, f"<b>{self._get_premium_emoji('stats')} {self.get_string('getting_results')}</b>", msg_id)
                         await asyncio.sleep(1)
                         await self._show_results(
                             msg, 
@@ -1098,25 +1032,19 @@ class VirusTotalMod(loader.Module):
                             existing_report, 
                             "file", 
                             original_filename=filename, 
-                            scan_time=elapsed, 
-                            file_size=file_size, 
-                            progress_msg=msg
+                            scan_time=int(time.time() - start_time), 
+                            file_size=file_size
                         )
                         return
                     
+                    await self._safe_edit(msg, f"<b>{self._get_premium_emoji('upload')} {self.get_string('uploading')}</b>", msg_id)
+                    
                     upload_result = await self._upload_file(session, file_path)
                     if not upload_result:
-                        error_msg = await self._get_progress_message(
-                            start_time=start_time, 
-                            progress_percentage=100, 
-                            filename=filename, 
-                            file_size=file_size, 
-                            scan_type="file",
-                            stage_text=f"{self._get_premium_emoji('error')} <b>{self.get_string('error_title')}</b>",
-                            info_text=f"{self._get_premium_emoji('forbidden')} <b>{self.get_string('upload_error')}</b>"
-                        )
-                        await self._safe_edit(msg, error_msg, msg_id)
+                        await self._safe_edit(msg, f"<b>{self._get_premium_emoji('error')} {self.get_string('upload_error')}</b>", msg_id)
                         return
+                    
+                    await self._safe_edit(msg, f"<b>{self._get_premium_emoji('waiting')} {self.get_string('waiting')}</b>", msg_id)
                     
                     result = await self._poll_analysis(
                         session, 
@@ -1130,17 +1058,7 @@ class VirusTotalMod(loader.Module):
                     )
                     
                     if result:
-                        elapsed = int(time.time() - start_time)
-                        stage3_msg = await self._get_progress_message(
-                            start_time=start_time, 
-                            progress_percentage=95, 
-                            filename=filename, 
-                            file_size=file_size, 
-                            scan_type="file",
-                            stage_text=f"{self._get_premium_emoji('success')} <b>{self.get_string('completing')}</b>",
-                            info_text=f"<b>{self.get_string('getting_results')}</b>"
-                        )
-                        await self._safe_edit(msg, stage3_msg, msg_id)
+                        await self._safe_edit(msg, f"<b>{self._get_premium_emoji('stats')} {self.get_string('getting_results')}</b>", msg_id)
                         
                         final_report = await self._get_file_report(session, file_hash)
                         await self._show_results(
@@ -1149,85 +1067,41 @@ class VirusTotalMod(loader.Module):
                             final_report or result, 
                             "file", 
                             original_filename=filename, 
-                            scan_time=elapsed, 
-                            file_size=file_size, 
-                            progress_msg=msg
+                            scan_time=int(time.time() - start_time), 
+                            file_size=file_size
                         )
                     else:
-                        elapsed = int(time.time() - start_time)
-                        timeout_msg = await self._get_progress_message(
-                            start_time=start_time, 
-                            progress_percentage=100, 
-                            filename=filename, 
-                            file_size=file_size, 
-                            scan_type="file",
-                            stage_text=f"{self._get_premium_emoji('error')} <b>{self.get_string('timeout_title')}</b>",
-                            info_text=self.get_string('timeout')
-                        )
-                        await self._safe_edit(msg, timeout_msg, msg_id)
+                        await self._safe_edit(msg, f"<b>{self._get_premium_emoji('timeout')} {self.get_string('timeout')}</b>", msg_id)
                         
             elif scan_type == "url":
                 url = kwargs.get('url')
                 if not url:
                     args = utils.get_args_raw(message)
                     if not args:
-                        return await utils.answer(message, f"{self._get_premium_emoji('forbidden')} {self.get_string('no_url')}")
+                        return await utils.answer(message, f"{self._get_premium_emoji('forbidden')} <b>{self.get_string('no_url')}</b>")
                     url = args.strip()
                 
                 if not self._validate_url(url):
-                    return await utils.answer(message, f"{self._get_premium_emoji('error')} {self.get_string('invalid_url')}")
+                    return await utils.answer(message, f"{self._get_premium_emoji('error')} <b>{self.get_string('invalid_url')}</b>")
                 
-                stage1_msg = await self._get_progress_message(
-                    start_time=start_time, 
-                    progress_percentage=10, 
-                    url=url, 
-                    scan_type="url",
-                    stage_text=f"{self._get_premium_emoji('url')} <b>{self.get_string('scanning_url')}</b>",
-                    info_text=f"<b>{self.get_string('scanning_url')}</b>"
-                )
-                msg = await utils.answer(message, stage1_msg)
+                msg = await utils.answer(message, f"<b>{self._get_premium_emoji('url')} {self.get_string('scanning_url')}</b>")
                 msg_id = id(msg)
                 
                 session = self._get_session()
                 url_encoded = base64.urlsafe_b64encode(url.encode()).decode().strip("=")
                 
-                stage2_msg = await self._get_progress_message(
-                    start_time=start_time, 
-                    progress_percentage=50, 
-                    url=url, 
-                    scan_type="url",
-                    stage_text=f"{self._get_premium_emoji('check')} <b>{self.get_string('checking_cache')}</b>",
-                    info_text=f"<b>{self.get_string('uploading')}</b>"
-                )
-                await self._safe_edit(msg, stage2_msg, msg_id)
+                await self._safe_edit(msg, f"<b>{self._get_premium_emoji('check')} {self.get_string('checking_cache')}</b>", msg_id)
                 
                 scan_result = await self._scan_url(session, url)
                 
                 if not scan_result or scan_result.get("type") == "error":
-                    error_msg = await self._get_progress_message(
-                        start_time=start_time, 
-                        progress_percentage=100, 
-                        url=url, 
-                        scan_type="url",
-                        stage_text=f"{self._get_premium_emoji('error')} <b>{self.get_string('error_title')}</b>",
-                        info_text=f"{self._get_premium_emoji('forbidden')} <b>{self.get_string('scan_error')}</b>"
-                    )
-                    await self._safe_edit(msg, error_msg, msg_id)
+                    await self._safe_edit(msg, f"<b>{self._get_premium_emoji('error')} {self.get_string('scan_error')}</b>", msg_id)
                     return
                 
                 if scan_result["type"] == "existing":
                     existing_report = await self._get_url_report(session, scan_result["id"])
                     if existing_report:
-                        elapsed = int(time.time() - start_time)
-                        stage3_msg = await self._get_progress_message(
-                            start_time=start_time, 
-                            progress_percentage=95, 
-                            url=url, 
-                            scan_type="url",
-                            stage_text=f"{self._get_premium_emoji('success')} <b>{self.get_string('completing')}</b>",
-                            info_text=f"<b>{self.get_string('getting_results')}</b>"
-                        )
-                        await self._safe_edit(msg, stage3_msg, msg_id)
+                        await self._safe_edit(msg, f"<b>{self._get_premium_emoji('stats')} {self.get_string('getting_results')}</b>", msg_id)
                         await asyncio.sleep(1)
                         await self._show_results(
                             msg, 
@@ -1235,14 +1109,15 @@ class VirusTotalMod(loader.Module):
                             existing_report, 
                             "url", 
                             original_url=url, 
-                            scan_time=elapsed, 
-                            progress_msg=msg
+                            scan_time=int(time.time() - start_time)
                         )
                         return
                     else:
                         scan_result = {"type": "new", "id": scan_result["id"]}
                 
                 if scan_result["type"] == "new":
+                    await self._safe_edit(msg, f"<b>{self._get_premium_emoji('waiting')} {self.get_string('waiting')}</b>", msg_id)
+                    
                     result = await self._poll_analysis(
                         session, 
                         scan_result["id"], 
@@ -1254,16 +1129,7 @@ class VirusTotalMod(loader.Module):
                     )
                     
                     if result:
-                        elapsed = int(time.time() - start_time)
-                        stage3_msg = await self._get_progress_message(
-                            start_time=start_time, 
-                            progress_percentage=95, 
-                            url=url, 
-                            scan_type="url",
-                            stage_text=f"{self._get_premium_emoji('success')} <b>{self.get_string('completing')}</b>",
-                            info_text=f"<b>{self.get_string('getting_results')}</b>"
-                        )
-                        await self._safe_edit(msg, stage3_msg, msg_id)
+                        await self._safe_edit(msg, f"<b>{self._get_premium_emoji('stats')} {self.get_string('getting_results')}</b>", msg_id)
                         
                         final_report = await self._get_url_report(session, url_encoded)
                         if final_report:
@@ -1273,34 +1139,16 @@ class VirusTotalMod(loader.Module):
                                 final_report, 
                                 "url", 
                                 original_url=url, 
-                                scan_time=elapsed, 
-                                progress_msg=msg
+                                scan_time=int(time.time() - start_time)
                             )
                         else:
-                            timeout_msg = await self._get_progress_message(
-                                start_time=start_time, 
-                                progress_percentage=100, 
-                                url=url, 
-                                scan_type="url",
-                                stage_text=f"{self._get_premium_emoji('error')} <b>{self.get_string('timeout_title')}</b>",
-                                info_text=self.get_string('timeout')
-                            )
-                            await self._safe_edit(msg, timeout_msg, msg_id)
+                            await self._safe_edit(msg, f"<b>{self._get_premium_emoji('timeout')} {self.get_string('timeout')}</b>", msg_id)
                     else:
-                        elapsed = int(time.time() - start_time)
-                        timeout_msg = await self._get_progress_message(
-                            start_time=start_time, 
-                            progress_percentage=100, 
-                            url=url, 
-                            scan_type="url",
-                            stage_text=f"{self._get_premium_emoji('error')} <b>{self.get_string('timeout_title')}</b>",
-                            info_text=self.get_string('timeout')
-                        )
-                        await self._safe_edit(msg, timeout_msg, msg_id)
+                        await self._safe_edit(msg, f"<b>{self._get_premium_emoji('timeout')} {self.get_string('timeout')}</b>", msg_id)
         
         except Exception as e:
             elapsed = int(time.time() - start_time) if 'start_time' in locals() else 0
-            error_text = f"{self._get_premium_emoji('error')} {self.get_string('error')}: {str(e)[:100]} ({self._format_time(elapsed)})"
+            error_text = f"<b>{self._get_premium_emoji('error')} {self.get_string('error')}: {str(e)[:100]} ({self._format_time(elapsed)})</b>"
             if msg:
                 await self._safe_edit(msg, error_text, msg_id)
             else:
@@ -1314,7 +1162,7 @@ class VirusTotalMod(loader.Module):
     async def vtl(self, message):
         api_key = self.config["api_key"]
         if not api_key:
-            return await utils.answer(message, f"{self._get_premium_emoji('forbidden')} {self.get_string('no_key')}")
+            return await utils.answer(message, f"{self._get_premium_emoji('forbidden')} <b>{self.get_string('no_key')}</b>")
         
         url = None
         args = utils.get_args_raw(message)
@@ -1338,12 +1186,12 @@ class VirusTotalMod(loader.Module):
                         url = re.sub(r'[<>"].*$', '', url)
         
         if not url:
-            return await utils.answer(message, f"{self._get_premium_emoji('forbidden')} {self.get_string('no_url')}")
+            return await utils.answer(message, f"{self._get_premium_emoji('forbidden')} <b>{self.get_string('no_url')}</b>")
         
         url = url.split('"')[0].split('>')[0].split('<')[0]
         
         if not self._validate_url(url):
-            return await utils.answer(message, f"{self._get_premium_emoji('error')} {self.get_string('invalid_url')}")
+            return await utils.answer(message, f"{self._get_premium_emoji('error')} <b>{self.get_string('invalid_url')}</b>")
         
         await self._handle_scan_common(message, "url", url=url)
 
@@ -1351,7 +1199,7 @@ class VirusTotalMod(loader.Module):
     async def vthash(self, message):
         api_key = self.config["api_key"]
         if not api_key:
-            return await utils.answer(message, f"{self._get_premium_emoji('forbidden')} {self.get_string('no_key')}")
+            return await utils.answer(message, f"{self._get_premium_emoji('forbidden')} <b>{self.get_string('no_key')}</b>")
 
         args = utils.get_args_raw(message)
         if not args:
@@ -1409,31 +1257,17 @@ class VirusTotalMod(loader.Module):
         try:
             start_time = time.time()
             
-            stage1_msg = await self._get_progress_message(
-                start_time=start_time, 
-                progress_percentage=10, 
-                filename=self.get_string('by_hash', type=hash_type), 
-                scan_type="file",
-                stage_text=f"{self._get_premium_emoji('hash')} <b>{self.get_string('checking_hash')}</b>",
-                info_text=f"<b>{self.get_string('searching_report', type=hash_type)}</b>"
-            )
-            msg = await utils.answer(message, stage1_msg)
+            msg = await utils.answer(message, f"<b>{self._get_premium_emoji('hash')} {self.get_string('checking_hash')}</b>")
             msg_id = id(msg)
             
             session = self._get_session()
+            
+            await self._safe_edit(msg, f"<b>{self._get_premium_emoji('check')} {self.get_string('searching_report', type=hash_type)}</b>", msg_id)
+            
             existing_report = await self._check_existing_report(session, file_hash)
             
             if existing_report:
-                elapsed = int(time.time() - start_time)
-                stage2_msg = await self._get_progress_message(
-                    start_time=start_time, 
-                    progress_percentage=95, 
-                    filename=self.get_string('by_hash', type=hash_type), 
-                    scan_type="file",
-                    stage_text=f"{self._get_premium_emoji('success')} <b>{self.get_string('completing')}</b>",
-                    info_text=f"<b>{self.get_string('getting_results')}</b>"
-                )
-                await self._safe_edit(msg, stage2_msg, msg_id)
+                await self._safe_edit(msg, f"<b>{self._get_premium_emoji('stats')} {self.get_string('getting_results')}</b>", msg_id)
                 await asyncio.sleep(1)
                 await self._show_results(
                     msg, 
@@ -1441,23 +1275,14 @@ class VirusTotalMod(loader.Module):
                     existing_report, 
                     "file", 
                     original_filename=f"{self.get_string('hash')}: {display_hash}", 
-                    scan_time=elapsed, 
-                    progress_msg=msg
+                    scan_time=int(time.time() - start_time)
                 )
             else:
-                not_found_msg = await self._get_progress_message(
-                    start_time=start_time, 
-                    progress_percentage=100, 
-                    filename=self.get_string('by_hash', type=hash_type), 
-                    scan_type="file",
-                    stage_text=f"{self._get_premium_emoji('error')} <b>{self.get_string('not_found')}</b>",
-                    info_text=f"{self._get_premium_emoji('error')} <b>{self.get_string('report_not_found')}</b>"
-                )
-                await self._safe_edit(msg, not_found_msg, msg_id)
+                await self._safe_edit(msg, f"<b>{self._get_premium_emoji('not_found')} {self.get_string('not_found')}</b>", msg_id)
                 
         except Exception as e:
             elapsed = int(time.time() - start_time)
-            error_text = f"{self._get_premium_emoji('error')} {self.get_string('error')}: {str(e)[:100]} ({self._format_time(elapsed)})"
+            error_text = f"<b>{self._get_premium_emoji('error')} {self.get_string('error')}: {str(e)[:100]} ({self._format_time(elapsed)})</b>"
             if msg:
                 await self._safe_edit(msg, error_text, msg_id)
             else:
@@ -1539,4 +1364,4 @@ class VirusTotalMod(loader.Module):
             await utils.answer(
                 message, 
                 f"{self._get_premium_emoji('error')} <b>{'Неверный язык. Используйте: ru или en' if self._current_language == 'ru' else 'Invalid language. Use: ru or en'}</b>"
-            )
+                    )
