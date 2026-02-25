@@ -1,7 +1,8 @@
 # Author TG: @monkvy
-# Version: 2.0.0
+# Version: 2.0.3
+# Telegram Channel: https://t.me/codex_modules
+# Telegram Chat: https://t.me/CodexCommunityChat
 # https://github.com/monkvy/VirusTotal-hikka-bot
-# Description: VirusTotal integration module for Hikka
 
 import asyncio
 import logging
@@ -53,7 +54,7 @@ class VirusTotalMod(loader.Module):
         "history_cleared": "История очищена",
         "history_entries": "Всего записей",
         "history_max": "максимум",
-        "clear_history": "Очистить историю",
+        "clear_history": "Очистить",
         "hash_check": "Проверить по хешу",
         "history_search": "Поиск в истории",
         "invalid_history_limit": "❌ Должно быть целым числом в промежутке от 1 до 30",
@@ -75,7 +76,7 @@ class VirusTotalMod(loader.Module):
         "refresh": "Обновить",
         "first_page": "Первая",
         "last_page": "Последняя",
-        "back_to_results": "Обратно к результатам",
+        "back_to_results": "Обратно",
         "file": "Файл",
         "url": "Ссылка",
         "hash": "Хеш",
@@ -154,7 +155,7 @@ class VirusTotalMod(loader.Module):
         "history_cleared": "History cleared",
         "history_entries": "Total entries",
         "history_max": "maximum",
-        "clear_history": "Clear history",
+        "clear_history": "Clear",
         "hash_check": "Check by hash",
         "history_search": "History search",
         "invalid_history_limit": "❌ Must be integer between 1 and 30",
@@ -176,7 +177,7 @@ class VirusTotalMod(loader.Module):
         "refresh": "Refresh",
         "first_page": "First",
         "last_page": "Last",
-        "back_to_results": "Back to results",
+        "back_to_results": "Back",
         "file": "File",
         "url": "URL",
         "hash": "Hash",
@@ -716,10 +717,7 @@ class VirusTotalMod(loader.Module):
                 f"{threats_emoji} <b>{self.get_string('threats')}:</b> <code>{malicious} {self.get_string('detected')}</code>",
                 "",
                 f"<b>{self._get_premium_emoji('chart')} {self.get_string('results')}:</b>",
-                f"🚫<code>{malicious}/{total_engines} ({malicious_percent}%)│{self.get_string('malicious')}</code>",
-                f"⚠️<code>{suspicious}/{total_engines} ({suspicious_percent}%)│{self.get_string('suspicious')}</code>",
-                f"{self._get_premium_emoji('success')}<code>{harmless}/{total_engines} ({harmless_percent}%)│{self.get_string('harmless')}</code>",
-                f"👁️<code>{undetected}/{total_engines} ({undetected_percent}%)│{self.get_string('undetected')}</code>"
+                f"<blockquote>🚫<code>{malicious}/{total_engines} ({malicious_percent}%)│{self.get_string('malicious')}</code>\n⚠️<code>{suspicious}/{total_engines} ({suspicious_percent}%)│{self.get_string('suspicious')}</code>\n{self._get_premium_emoji('success')}<code>{harmless}/{total_engines} ({harmless_percent}%)│{self.get_string('harmless')}</code>\n👁️<code>{undetected}/{total_engines} ({undetected_percent}%)│{self.get_string('undetected')}</code></blockquote>"
             ])
 
             self._save_to_history(
@@ -771,7 +769,7 @@ class VirusTotalMod(loader.Module):
             error_text = f"{self._get_premium_emoji('error')} {self.get_string('error')}: {str(e)}"
             await utils.answer(message, error_text)
 
-    async def _show_history_page(self, message, page=1, return_message_id=None):
+    async def _show_history_page(self, message, page_num=1, return_message_id=None):
         if not self.scan_history:
             if hasattr(message, 'edit') and callable(getattr(message, 'edit')):
                 text = f"{self._get_premium_emoji('history_empty')} <b>{self.get_string('history_empty')}</b>"
@@ -786,9 +784,17 @@ class VirusTotalMod(loader.Module):
         items_per_page = self.config["history_items_per_page"]
         total_items = len(sorted_history)
         total_pages = (total_items + items_per_page - 1) // items_per_page
-        page = max(1, min(page, total_pages))
         
-        start_idx = (page - 1) * items_per_page
+        if page_num > total_pages:
+            if hasattr(message, 'answer'):
+                await message.answer(f"{self._get_normal_emoji('warning')} Страницы {page_num} не существует. Показана последняя страница.")
+            page_num = total_pages
+        elif page_num < 1:
+            page_num = 1
+        
+        current_page = page_num
+        
+        start_idx = (current_page - 1) * items_per_page
         page_items = sorted_history[start_idx:start_idx + items_per_page]
         
         text_lines = [
@@ -808,8 +814,18 @@ class VirusTotalMod(loader.Module):
                 name = data.get('name', 'Неизвестный файл' if self._current_language == 'ru' else 'Unknown file')
                 if len(name) > 25:
                     name = name[:22] + "..."
-                text_lines.append(f"<b>{i}.</b> {icon} <b>{name}</b>")
-                text_lines.append(f"   {self._get_premium_emoji('hash')} <code>{item_id}</code>")
+                
+                block_content = f"<b>{i}.</b> {icon} <b>{name}</b>\n   {self._get_premium_emoji('hash')} <code>{item_id}</code>\n   {self._get_premium_emoji('time')} <code>{timestamp}</code>"
+                
+                stats = data.get('stats', {})
+                malicious = stats.get('malicious', 0)
+                suspicious = stats.get('suspicious', 0)
+                total = stats.get('total', 0)
+                
+                _, status_text = self._get_history_status(malicious, suspicious, total)
+                block_content += f"\n   {status_text}"
+                
+                text_lines.append(f"<blockquote>{block_content}</blockquote>")
             else:
                 icon = self._get_premium_emoji('globe')
                 url = data.get('url', 'Неизвестная ссылка' if self._current_language == 'ru' else 'Unknown URL')
@@ -819,21 +835,21 @@ class VirusTotalMod(loader.Module):
                 except:
                     domain = url[:20] + "..." if len(url) > 20 else url
                 
-                text_lines.append(f"<b>{i}.</b> {icon} <b>{domain} ({self.get_string('url')})</b>")
                 url_display = url[:37] + "..." if len(url) > 40 else url
-                text_lines.append(f"    {self._get_premium_emoji('url')} <code>{url_display}</code>")
-            
-            text_lines.append(f"   {self._get_premium_emoji('time')} <code>{timestamp}</code>")
-            
-            stats = data.get('stats', {})
-            malicious = stats.get('malicious', 0)
-            suspicious = stats.get('suspicious', 0)
-            total = stats.get('total', 0)
-            
-            _, status_text = self._get_history_status(malicious, suspicious, total)
-            text_lines.append(f"   {status_text}")
-            text_lines.append("")
+                
+                block_content = f"<b>{i}.</b> {icon} <b>{domain} ({self.get_string('url')})</b>\n    {self._get_premium_emoji('url')} <code>{url_display}</code>\n   {self._get_premium_emoji('time')} <code>{timestamp}</code>"
+                
+                stats = data.get('stats', {})
+                malicious = stats.get('malicious', 0)
+                suspicious = stats.get('suspicious', 0)
+                total = stats.get('total', 0)
+                
+                _, status_text = self._get_history_status(malicious, suspicious, total)
+                block_content += f"\n   {status_text}"
+                
+                text_lines.append(f"<blockquote>{block_content}</blockquote>")
         
+        text_lines.append("")
         text_lines.append(f"<b>{self.get_string('history_entries')}: {total_items}/{self.config['max_history_items']}</b>")
         
         text = "\n".join(text_lines)
@@ -842,17 +858,17 @@ class VirusTotalMod(loader.Module):
         
         if total_pages > 1:
             row = []
-            if page > 1:
+            if current_page > 1:
                 row.append({
                     "text": f"{self._get_normal_emoji('left_arrow')} {self.get_string('prev_page')}",
                     "callback": self._history_callback,
-                    "args": (page - 1, return_message_id)
+                    "args": (current_page - 1, return_message_id)
                 })
-            if page < total_pages:
+            if current_page < total_pages:
                 row.append({
                     "text": f"{self.get_string('next_page')} {self._get_normal_emoji('right_arrow')}",
                     "callback": self._history_callback,
-                    "args": (page + 1, return_message_id)
+                    "args": (current_page + 1, return_message_id)
                 })
             if row:
                 buttons.append(row)
@@ -865,7 +881,7 @@ class VirusTotalMod(loader.Module):
             {
                 "text": f"{self._get_normal_emoji('refresh')} {self.get_string('refresh')}",
                 "callback": self._history_callback,
-                "args": (page, return_message_id)
+                "args": (current_page, return_message_id)
             }
         ]
         
@@ -879,9 +895,17 @@ class VirusTotalMod(loader.Module):
         buttons.append(row2)
         
         if hasattr(message, 'edit') and callable(getattr(message, 'edit')):
-            await message.edit(text=text, reply_markup=buttons)
-            if hasattr(message, 'answer'):
-                await message.answer(f"{self._get_normal_emoji('pages')} {'Страница' if self._current_language == 'ru' else 'Page'} {page}")
+            try:
+                await message.edit(text=text, reply_markup=buttons)
+                if hasattr(message, 'answer'):
+                    await message.answer(f"{self._get_normal_emoji('pages')} {'Страница' if self._current_language == 'ru' else 'Page'} {current_page}")
+            except TypeError:
+                await self.inline.form(
+                    text=text,
+                    message=message,
+                    reply_markup=buttons,
+                    ttl=300
+                )
         else:
             await self.inline.form(
                 text=text,
@@ -890,11 +914,11 @@ class VirusTotalMod(loader.Module):
                 ttl=300
             )
 
-    async def _history_callback(self, call, page=1, return_message_id=None):
-        await self._show_history_page(call, page, return_message_id)
+    async def _history_callback(self, call, page_num=1, return_message_id=None):
+        await self._show_history_page(call, page_num, return_message_id)
 
-    async def _history_from_results_callback(self, call, page=1, return_message_id=None):
-        await self._show_history_page(call, page, return_message_id)
+    async def _history_from_results_callback(self, call, page_num=1, return_message_id=None):
+        await self._show_history_page(call, page_num, return_message_id)
 
     async def _return_to_results_callback(self, call, message_id):
         return_data = self._db.get(__name__, f"result_{message_id}", None)
@@ -1298,11 +1322,21 @@ class VirusTotalMod(loader.Module):
             )
         
         try:
-            page = int(utils.get_args_raw(message) or 1)
+            page_num = int(utils.get_args_raw(message) or 1)
         except ValueError:
-            page = 1
+            page_num = 1
         
-        await self._show_history_page(message, page)
+        total_items = len(self.scan_history)
+        items_per_page = self.config["history_items_per_page"]
+        total_pages = (total_items + items_per_page - 1) // items_per_page
+        
+        if page_num < 1:
+            page_num = 1
+        elif page_num > total_pages:
+            await utils.answer(message, f"{self._get_premium_emoji('warning')} <b>Страницы {page_num} не существует. Показана последняя страница.</b>")
+            page_num = total_pages
+        
+        await self._show_history_page(message, page_num)
 
     @loader.command(ru_doc=" - очистить историю сканирований", en_doc=" - clear scan history")
     async def vtclear(self, message):
@@ -1365,4 +1399,4 @@ class VirusTotalMod(loader.Module):
             await utils.answer(
                 message, 
                 f"{self._get_premium_emoji('error')} <b>{'Неверный язык. Используйте: ru или en' if self._current_language == 'ru' else 'Invalid language. Use: ru or en'}</b>"
-                    )
+    )
