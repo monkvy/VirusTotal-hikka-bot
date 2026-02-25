@@ -1,57 +1,63 @@
 # VirusTotal Hikka Bot
 
-Автор: @monkvy  
-Версия: 2.0.3
+Author: @monkvy  
+Version: 2.0.3
 
-## 📥 Установка
+## 📥 Installation
 
-`.dlm https://raw.githubusercontent.com/monkvy/VirusTotal-hikka-bot/refs/heads/main/VirusTotal%20-%20V2.py`
+```
+.dlm https://raw.githubusercontent.com/monkvy/VirusTotal-hikka-bot/refs/heads/main/VirusTotal%20-%20V2.py
+```
 
-## 💻 Команды
+## 💻 Commands
 
-`.vt` — просканировать файл (ответом)  
-`.vtl <ссылка>` — просканировать ссылку  
-`.vthash <хеш>` — проверить по хешу (SHA256/MD5)  
-`.vthistory` — история сканирований  
-`.vtclear` — очистить историю  
-`.vtlang ru/en` — сменить язык
+```
+.vt — scan a file (reply to a file)
+.vtl <url> — scan a URL
+.vthash <hash> — check by hash (SHA256 / MD5)
+.vthistory — scan history
+.vtclear — clear history
+.vtlang ru/en — change language
+```
 
-## ⚙️ Конфиг
+## ⚙️ Config
 
-`api_key` — API ключ VirusTotal (обязательно)  
-`max_wait_time` — максимальное время ожидания (300 сек)  
-`poll_interval` — интервал проверки (10 сек)  
-`save_history` — сохранять историю (True)  
-`max_history_items` — максимум записей в истории (10)  
-`language` — язык интерфейса (ru/en)
+```
+api_key — VirusTotal API key (required)
+max_wait_time — maximum wait time (300 sec)
+poll_interval — check interval (10 sec)
+save_history — save history (True)
+max_history_items — maximum history entries (10)
+language — interface language (ru/en)
+```
 
-## 📊 Как понять результаты
+## 📊 Understanding Results
 
-🚫 Malicious — опасно  
-⚠️ Suspicious — подозрительно  
-✅ Harmless — безопасно  
-👁️ Undetected — не обнаружено
+🚫 Malicious — dangerous  
+⚠️ Suspicious — potentially unsafe  
+✅ Harmless — safe  
+👁️ Undetected — no detection  
 
-0-2 обнаружено — низкий риск  
-3-5 — средний риск  
-6-10 — высокий риск  
-10+ — критический риск
+0–2 detections — low risk  
+3–5 — medium risk  
+6–10 — high risk  
+10+ — critical risk  
 
-## 🔑 Получение API ключа
+## 🔑 Getting an API Key
 
-1. Зарегистрируйтесь на [virustotal.com](https://www.virustotal.com)
-2. Перейдите в настройки профиля
-3. Скопируйте API ключ
-4. Вставьте в конфиг модуля
+1. Register at https://www.virustotal.com  
+2. Go to your profile settings  
+3. Copy your API key  
+4. Paste it into the module config  
 
-## 🔄 Что нового в v2.0.3
+## 🔄 What’s New in v2.0.3
 
-• Премиум эмодзи во всех статусах  
-• Статусы жирным текстом  
-• Убран прогресс-бар (чистые статусы)  
-• Исправлены ошибкой инлайн кнопках  
-• Оптимизация кода
+• Premium emojis in all statuses  
+• Bold status formatting  
+• Removed progress bar (clean status display)  
+• Fixed inline button errors  
+• Code optimization  
 
-## 📞 Поддержка
+## 📞 Support
 
-По всем вопросам TG: @monkvy
+For any questions: TG @monkvy
