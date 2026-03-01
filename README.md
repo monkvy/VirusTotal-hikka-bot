@@ -51,11 +51,11 @@ language — interface language (ru/en)
 4. Paste it into the module config  
 
 ## 🔄 What’s New in v3.0.0
-• .vt command unified – scan files, links, IPs in one go
-• IP scanning added – visible in results & history
-• Links auto‑https enabled
-• Automatic cleanup of old data (default: 1 hour)
-• Refined architecture – more stable and easier to maintain
+• .vt command unified – scan files, links, IPs in one go.    
+• IP scanning added – visible in results & history.      
+• Links auto‑https enabled.     
+• Automatic cleanup of old data (default: 1 hour).      
+• Refined architecture – more stable and easier to maintain.     
 
 ## 📞 Support
 
