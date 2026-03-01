@@ -1,7 +1,7 @@
 # VirusTotal Hikka Bot
 
 Author: @monkvy  
-Version: 2.0.3
+Version: 3.0.0
 
 ## 📥 Installation
 
@@ -50,13 +50,12 @@ language — interface language (ru/en)
 3. Copy your API key  
 4. Paste it into the module config  
 
-## 🔄 What’s New in v2.0.3
-
-• Premium emojis in all statuses  
-• Bold status formatting  
-• Removed progress bar (clean status display)  
-• Fixed inline button errors  
-• Code optimization  
+## 🔄 What’s New in v3.0.0
+• .vt command unified – scan files, links, IPs in one go
+• IP scanning added – visible in results & history
+• Links auto‑https enabled
+• Automatic cleanup of old data (default: 1 hour)
+• Refined architecture – more stable and easier to maintain
 
 ## 📞 Support
 
