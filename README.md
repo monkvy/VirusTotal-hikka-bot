@@ -4,7 +4,7 @@ Version: 3.0.0
 
 ## 📥 Installation
 ```
-.dlm https://raw.githubusercontent.com/monkvy/VirusTotal-hikka-bot/refs/heads/main/VirusTotal%20-%20V2.py
+.dlm https://raw.githubusercontent.com/monkvy/VirusTotal-hikka-bot/refs/heads/main/VirusTotal_V3.py
 ```
 
 ## 💻 Commands
