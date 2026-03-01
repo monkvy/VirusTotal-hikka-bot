@@ -45,13 +45,11 @@ cleanup_interval — clean old results every N seconds (default: 3600)
 4. Paste it into the module config  
 
 ## 🔄 What’s New in v3.0.0
-• .vt command unified – scan files, links, IPs in one go
-• IP scanning added – country flag and AS owner visible in results & history
-• Links auto‑https enabled
-• Automatic cleanup of old data (default: 1 hour)
-• Refined architecture – more stable and easier to maintain
+• .vt command unified – scan files, links, IPs in one go.    
+• IP scanning added – country flag and AS owner visible in results & history.     
+• Links auto‑https enabled.     
+• Automatic cleanup of old data (default: 1 hour)    
+• Refined architecture – more stable and easier to maintain.     
 
 ## 📞 Support
-
-
 For any questions: TG @monkvy
