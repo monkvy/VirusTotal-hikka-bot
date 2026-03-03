@@ -1,1113 +1,806 @@
-# Author TG: @monkvy
-# Version: v3.0.0
-# Telegram Channel: https://t.me/codex_modules
-# Telegram Chat: https://t.me/CodexCommunityChat
-# https://github.com/monkvy/VirusTotal-hikka-bot
+#  This file is part of Codex modules
+#  Copyright (c) 2026 Codex
+#  This software is released under the MIT License.
+#  https://opensource.org/licenses/MIT
 
-import asyncio
-import logging
-import os
-import tempfile
-import re
-import base64
-import hashlib
-import time
-import ipaddress
-from datetime import datetime, timezone
+__version__ = (3, 0, 0)  # v3.0
+
+# meta developer: @monkvy
+
+#░█████╗░░█████╗░██████╗░███████╗██╗░░██╗
+#██╔══██╗██╔══██╗██╔══██╗██╔════╝╚██╗██╔╝
+#██║░░╚═╝██║░░██║██║░░██║█████╗░░░╚███╔╝░
+#██║░░██╗██║░░██║██║░░██║██╔══╝░░░██╔██╗░
+#╚█████╔╝╚█████╔╝██████╔╝███████╗██╔╝╚██╗
+#░╚════╝░░╚════╝░╚═════╝░╚══════╝╚═╝░░╚═╝
+
+import asyncio,re,base64,hashlib,time,ipaddress,random,logging
+from datetime import datetime,timezone
 from urllib.parse import urlparse
-from typing import Optional, Dict, Any, List, Tuple
-from dataclasses import dataclass, field
-
+from typing import Optional,Dict,Tuple,List
+from dataclasses import dataclass,field
 import aiohttp
+from .. import loader,utils
 
-from .. import loader, utils
+MAX_FILE_SIZE=32*1024*1024
+HISTORY_PER_PAGE=5
+logger=logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)
+class VirusTotalError(Exception):pass
+class QuotaExceededError(VirusTotalError):pass
+class InvalidKeyError(VirusTotalError):pass
+class RateLimitError(VirusTotalError):pass
+class NotFoundError(VirusTotalError):pass
 
 @dataclass
 class ScanStats:
-    malicious: int = 0
-    suspicious: int = 0
-    harmless: int = 0
-    undetected: int = 0
-
+    malicious:int=0
+    suspicious:int=0
+    harmless:int=0
+    undetected:int=0
     @property
-    def total(self) -> int:
-        return self.malicious + self.suspicious + self.harmless + self.undetected
+    def total(self)->int:
+        return self.malicious+self.suspicious+self.harmless+self.undetected
 
 @dataclass
 class HistoryEntry:
-    item_id: str
-    timestamp: datetime
-    scan_type: str
-    name: Optional[str] = None
-    url: Optional[str] = None
-    as_owner: Optional[str] = None
-    country_code: Optional[str] = None
-    stats: ScanStats = field(default_factory=ScanStats)
-    raw_result: dict = field(default_factory=dict)
-
-class VTAPIClient:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self._session: Optional[aiohttp.ClientSession] = None
-        self._retries = 3
-
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(headers={'x-apikey': self.api_key})
-        return self._session
-
-    async def close(self):
-        if self._session and not self._session.closed:
-            await self._session.close()
-
-    async def _request(self, method: str, url: str, **kwargs) -> Optional[Dict]:
-        for attempt in range(self._retries):
-            try:
-                session = await self._get_session()
-                async with session.request(method, url, **kwargs) as resp:
-                    if resp.status == 429:
-                        wait = int(resp.headers.get('Retry-After', 60))
-                        await asyncio.sleep(wait)
-                        continue
-                    if resp.status == 200:
-                        return await resp.json()
-                    return None
-            except (aiohttp.ClientConnectorError, asyncio.TimeoutError):
-                if attempt == self._retries - 1:
-                    raise
-                await asyncio.sleep(2 ** attempt)
-        return None
-
-    async def upload_file(self, file_path: str) -> Optional[str]:
-        with open(file_path, 'rb') as f:
-            data = aiohttp.FormData()
-            data.add_field('file', f, filename=os.path.basename(file_path))
-            result = await self._request('POST', 'https://www.virustotal.com/api/v3/files', data=data)
-            return result.get('data', {}).get('id') if result else None
-
-    async def get_analysis(self, analysis_id: str) -> Optional[Dict]:
-        return await self._request('GET', f'https://www.virustotal.com/api/v3/analyses/{analysis_id}')
-
-    async def get_file_report(self, file_hash: str) -> Optional[Dict]:
-        return await self._request('GET', f'https://www.virustotal.com/api/v3/files/{file_hash}')
-
-    async def get_url_report(self, url_id: str) -> Optional[Dict]:
-        return await self._request('GET', f'https://www.virustotal.com/api/v3/urls/{url_id}')
-
-    async def scan_url(self, url: str) -> Optional[Dict]:
-        data = aiohttp.FormData()
-        data.add_field('url', url)
-        result = await self._request('POST', 'https://www.virustotal.com/api/v3/urls', data=data)
-        return result
-
-    async def get_ip_report(self, ip: str) -> Optional[Dict]:
-        return await self._request('GET', f'https://www.virustotal.com/api/v3/ip_addresses/{ip}')
-
-class HistoryManager:
-    def __init__(self, db, max_items: int = 10):
-        self._db = db
-        self.max_items = max_items
-        self._entries: List[HistoryEntry] = []
-        self._load()
-
-    def _load(self):
-        data = self._db.get(__name__, 'history', [])
-        for item in data:
-            try:
-                entry = HistoryEntry(
-                    item_id=item['item_id'],
-                    timestamp=datetime.fromisoformat(item['timestamp']),
-                    scan_type=item['scan_type'],
-                    name=item.get('name'),
-                    url=item.get('url'),
-                    as_owner=item.get('as_owner'),
-                    country_code=item.get('country_code'),
-                    stats=ScanStats(**item.get('stats', {})),
-                    raw_result=item.get('raw_result', {})
-                )
-                self._entries.append(entry)
-            except:
-                continue
-
-    def _save(self):
-        data = []
-        for entry in self._entries:
-            data.append({
-                'item_id': entry.item_id,
-                'timestamp': entry.timestamp.isoformat(),
-                'scan_type': entry.scan_type,
-                'name': entry.name,
-                'url': entry.url,
-                'as_owner': entry.as_owner,
-                'country_code': entry.country_code,
-                'stats': {
-                    'malicious': entry.stats.malicious,
-                    'suspicious': entry.stats.suspicious,
-                    'harmless': entry.stats.harmless,
-                    'undetected': entry.stats.undetected
-                },
-                'raw_result': entry.raw_result
-            })
-        self._db.set(__name__, 'history', data)
-
-    def _trim(self):
-        if len(self._entries) > self.max_items:
-            self._entries = self._entries[:self.max_items]
-
-    def add(self, entry: HistoryEntry):
-        self._entries.insert(0, entry)
-        self._trim()
-        self._save()
-
-    def clear(self):
-        self._entries.clear()
-        self._save()
-
-    def get_all(self) -> List[HistoryEntry]:
-        return self._entries.copy()
-
-    def get_page(self, page: int, per_page: int) -> List[HistoryEntry]:
-        start = (page - 1) * per_page
-        return self._entries[start:start + per_page]
-
-    @property
-    def total_pages(self, per_page: int) -> int:
-        return (len(self._entries) + per_page - 1) // per_page
-
-    def find_by_hash(self, hash_part: str) -> List[HistoryEntry]:
-        hash_part = hash_part.lower()
-        return [e for e in self._entries if hash_part in e.item_id.lower()]
-
-    def set_max_items(self, max_items: int):
-        self.max_items = max_items
-        self._trim()
-        self._save()
-
-class UIFormatter:
-    def __init__(self, lang: str = 'ru'):
-        self.lang = lang
-        self._premium_emojis = self._build_emojis(premium=True)
-        self._normal_emojis = self._build_emojis(premium=False)
-
-    def _build_emojis(self, premium: bool):
-        if premium:
-            return {
-                'file': '<emoji document_id=5433653135799228968>📁</emoji>',
-                'url': '<emoji document_id=5271604874419647061>🔗</emoji>',
-                'size': '<emoji document_id=5784891605601225888>📦</emoji>',
-                'time': '<emoji document_id=5382194935057372936>⏱️</emoji>',
-                'engines': '<emoji document_id=5195033767969839232>🚀</emoji>',
-                'scans': '<emoji document_id=5444965061749644170>👥</emoji>',
-                'progress': '<emoji document_id=5386367538735104399>⏳</emoji>',
-                'refresh': '<emoji document_id=5818740758257077530>🔄</emoji>',
-                'stats': '<emoji document_id=5231200819986047254>📊</emoji>',
-                'shield': '<emoji document_id=5251203410396458957>🛡</emoji>',
-                'check': '<emoji document_id=5231012545799666522>🔍</emoji>',
-                'success': '<emoji document_id=5206607081334906820>✅️</emoji>',
-                'error': '<emoji document_id=5210952531676504517>❌️</emoji>',
-                'warning': '<emoji document_id=5447644880824181073>⚠️</emoji>',
-                'danger': '<emoji document_id=5260293700088511294>⛔️</emoji>',
-                'skull': '<emoji document_id=5370842086658546991>☠️</emoji>',
-                'history': '<emoji document_id=5197269100878907942>📋</emoji>',
-                'pages': '<emoji document_id=5253742260054409879>📄</emoji>',
-                'hash': '<emoji document_id=5343824560523322473>🔢</emoji>',
-                'upload': '<emoji document_id=5433614747381538714>📤</emoji>',
-                'globe': '<emoji document_id=5447410659077661506>🌐</emoji>',
-                'chart': '<emoji document_id=5244837092042750681>📈</emoji>',
-                'forbidden': '<emoji document_id=5240241223632954241>🚫</emoji>',
-                'trash': '<emoji document_id=5445267414562389170>🗑</emoji>',
-                'history_empty': '<emoji document_id=5352896944496728039>📭</emoji>',
-                'downloading': '<emoji document_id=5433653135799228968>📥</emoji>',
-                'waiting': '<emoji document_id=5386367538735104399>⏳</emoji>',
-                'timeout': '<emoji document_id=5382194935057372936>⏰</emoji>',
-                'left_arrow': '⬅️',
-                'right_arrow': '➡️',
-                'back_arrow': '↩️',
-                'flag_ru': '🇷🇺',
-                'flag_gb': '🇬🇧',
-                'link': '🔗',
-                'cancel': '🚫'
-            }
-        else:
-            return {
-                'file': '📁',
-                'url': '🔗',
-                'size': '📦',
-                'time': '⏱️',
-                'engines': '🚀',
-                'scans': '👥',
-                'progress': '⏳',
-                'refresh': '🔄',
-                'stats': '📊',
-                'shield': '🛡',
-                'check': '🔍',
-                'success': '✅',
-                'error': '❌',
-                'warning': '⚠️',
-                'danger': '⛔',
-                'skull': '☠️',
-                'history': '📋',
-                'pages': '📄',
-                'hash': '🔢',
-                'upload': '📤',
-                'globe': '🌐',
-                'chart': '📈',
-                'forbidden': '🚫',
-                'trash': '🗑',
-                'history_empty': '📭',
-                'downloading': '📥',
-                'waiting': '⏳',
-                'timeout': '⏰',
-                'left_arrow': '⬅️',
-                'right_arrow': '➡️',
-                'back_arrow': '↩️',
-                'flag_ru': '🇷🇺',
-                'flag_gb': '🇬🇧',
-                'link': '🔗',
-                'cancel': '🚫'
-            }
-
-    def emoji(self, name: str, premium: bool = True) -> str:
-        if premium:
-            return self._premium_emojis.get(name, '')
-        else:
-            return self._normal_emojis.get(name, '')
-
-    def country_flag(self, country_code: str) -> str:
-        if not country_code or len(country_code) != 2:
-            return '🏳️'
-        base = 127462
-        code1 = base + (ord(country_code[0].upper()) - ord('A'))
-        code2 = base + (ord(country_code[1].upper()) - ord('A'))
-        return chr(code1) + chr(code2)
-
-    def format_size(self, size_bytes: int) -> str:
-        units = ['B', 'KB', 'MB', 'GB']
-        ru_units = ['Б', 'КБ', 'МБ', 'ГБ']
-        size = size_bytes
-        unit_index = 0
-        while size >= 1024 and unit_index < len(units) - 1:
-            size /= 1024
-            unit_index += 1
-        if self.lang == 'ru':
-            return f"{size:.1f} {ru_units[unit_index]}" if unit_index > 0 else f"{size:.0f} {ru_units[0]}"
-        else:
-            return f"{size:.1f} {units[unit_index]}" if unit_index > 0 else f"{size:.0f} {units[0]}"
-
-    def format_time(self, seconds: int) -> str:
-        if seconds < 60:
-            return f"{seconds} {'сек' if self.lang == 'ru' else 'sec'}"
-        else:
-            minutes = seconds // 60
-            remaining = seconds % 60
-            if remaining == 0:
-                return f"{minutes} {'мин' if self.lang == 'ru' else 'min'}"
-            return f"{minutes} {'мин' if self.lang == 'ru' else 'min'} {remaining} {'сек' if self.lang == 'ru' else 'sec'}"
-
-    def get_status_emoji(self, stats: ScanStats) -> Tuple[str, str]:
-        if stats.malicious > 0:
-            ratio = stats.malicious / stats.total if stats.total > 0 else 0
-            if ratio < 0.02:
-                return self.emoji('success'), 'likely_safe'
-            elif ratio < 0.05:
-                return self.emoji('warning'), 'suspicious'
-            elif ratio < 0.15:
-                return self.emoji('danger'), 'dangerous'
-            else:
-                return self.emoji('skull'), 'very_dangerous'
-        elif stats.suspicious > 0:
-            return self.emoji('warning'), 'suspicious'
-        else:
-            return self.emoji('success'), 'clean'
-
-    def format_stats_block(self, stats: ScanStats) -> str:
-        total = stats.total or 1
-        mal_pct = round(stats.malicious / total * 100, 1)
-        susp_pct = round(stats.suspicious / total * 100, 1)
-        harm_pct = round(stats.harmless / total * 100, 1)
-        und_pct = round(stats.undetected / total * 100, 1)
-        return (
-            f"<blockquote>🚫<code>{stats.malicious}/{total} ({mal_pct}%)│{'Вредоносные' if self.lang == 'ru' else 'Malicious'}</code>\n"
-            f"⚠️<code>{stats.suspicious}/{total} ({susp_pct}%)│{'Подозрительные' if self.lang == 'ru' else 'Suspicious'}</code>\n"
-            f"{self.emoji('success')}<code>{stats.harmless}/{total} ({harm_pct}%)│{'Безвредные' if self.lang == 'ru' else 'Harmless'}</code>\n"
-            f"👁️<code>{stats.undetected}/{total} ({und_pct}%)│{'Не обнаружено' if self.lang == 'ru' else 'Undetected'}</code></blockquote>"
-        )
-
-class InlineHandlers:
-    def __init__(self, module):
-        self.module = module
-
-    async def history_callback(self, call, page_num: int = 1, return_id: Optional[int] = None):
-        await self.module._show_history_page(call, page_num, return_id)
-
-    async def clear_confirm_callback(self, call):
-        if not self.module.history.get_all():
-            await call.answer(f"{self.module.ui.emoji('history_empty')} {'История пуста' if self.module.lang == 'ru' else 'History empty'}", show_alert=True)
-            return
-        warning_line = ('⚠️ Вы уверены, что хотите очистить всю историю?\nЭто действие нельзя отменить.'
-                        if self.module.lang == 'ru'
-                        else '⚠️ Are you sure you want to clear all history?\nThis action cannot be undone.')
-        text = (
-            f"<b>{self.module.ui.emoji('warning')} {'Подтверждение очистки' if self.module.lang == 'ru' else 'Confirm clear'}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"{warning_line}\n"
-            f"<b>{'Записей' if self.module.lang == 'ru' else 'Entries'}: {len(self.module.history.get_all())}</b>"
-        )
-        buttons = [[
-            {"text": f"{self.module.ui.emoji('success', premium=False)} {'Да, очистить' if self.module.lang == 'ru' else 'Yes, clear'}", "callback": self.module._clear_history_callback},
-            {"text": self.module.get_string('cancel'), "callback": self.cancel_clear_callback}
-        ]]
-        await call.edit(text=text, reply_markup=buttons)
-
-    async def cancel_clear_callback(self, call):
-        await self.module._show_history_page(call, 1, None)
-
-    async def return_to_results_callback(self, call, message_id: int):
-        data = self.module._db.get(__name__, f"result_{message_id}")
-        if not data:
-            await call.answer(f"{self.module.ui.emoji('error')} {'Результат устарел' if self.module.lang == 'ru' else 'Result expired'}", show_alert=True)
-            await call.delete()
-            return
-        buttons = [
-            [{"text": f"{self.module.ui.emoji('link', premium=False)} {self.module.get_string('view_report')}", "url": data['vt_url']}],
-            [{"text": f"{self.module.ui.emoji('history', premium=False)} {'История' if self.module.lang == 'ru' else 'History'}", "callback": self.history_callback, "args": (1, message_id)}]
-        ]
-        await call.edit(text=data['text'], reply_markup=buttons)
-
-    async def change_language_callback(self, call, lang: str):
-        self.module.config['language'] = lang
-        self.module.lang = lang
-        self.module.ui.lang = lang
-        await call.answer(f"{self.module.ui.emoji('success')} {'Язык изменен' if lang == 'ru' else 'Language changed'}")
-        await call.edit(text=f"<b>{self.module.ui.emoji('success')} {'Язык изменен на Русский' if lang == 'ru' else 'Language changed to English'}</b>", reply_markup=None)
-
-STRINGS = {
-    'ru': {
-        'name': 'VirusTotal',
-        'no_file': 'Ответьте на файл',
-        'no_url': 'Укажите ссылку после команды',
-        'invalid_url': 'Неверный формат ссылки',
-        'downloading': 'Скачиваю файл...',
-        'uploading': 'Загружаю на VirusTotal...',
-        'scanning_url': 'Сканирую ссылку...',
-        'waiting': 'Жду анализа...',
-        'no_key': 'Укажите API ключ в конфиге',
-        'error': 'Ошибка при сканировании',
-        'size_limit': 'Файл больше 32МБ',
-        'timeout': 'Таймаут сканирования',
-        'view_report': 'Полный отчёт',
-        'checking_cache': 'Проверка кэша...',
-        'getting_results': 'Получаю результаты...',
-        'upload_error': 'Ошибка загрузки',
-        'scan_error': 'Ошибка сканирования',
-        'download_error': 'Не удалось скачать файл: {error}',
-        'results_title': 'Результаты сканирования VirusTotal',
-        'history_title': 'История сканирований VirusTotal',
-        'history_empty': 'История сканирований пуста',
-        'history_cleared': 'История очищена',
-        'history_entries': 'Всего записей',
-        'clear_history': 'Очистить',
-        'hash_check': 'Проверить по хешу',
-        'invalid_history_limit': '❌ Должно быть целым числом от 1 до 30',
-        'history_limit_set': '✅ Лимит истории установлен на',
-        'history_settings': 'Настройки истории',
-        'current_limit': 'Текущий лимит',
-        'entries': 'записей',
-        'delete_entry': 'Удалить запись',
-        'entry_deleted': '✅ Запись удалена',
-        'cancel': 'Отмена',
-        'confirm_clear': 'Подтвердить очистку',
-        'clear_all_history': 'Очистить всю историю',
-        'clear_history_confirm': '⚠️ Вы уверены, что хотите очистить всю историю?\nЭто действие нельзя отменить.',
-        'scan_details': 'Детали сканирования',
-        'prev_page': 'Назад',
-        'next_page': 'Вперед',
-        'page_info': 'Страница',
-        'refresh': 'Обновить',
-        'first_page': 'Первая',
-        'last_page': 'Последняя',
-        'back_to_results': 'Обратно',
-        'file': 'Файл',
-        'url': 'Ссылка',
-        'hash': 'Хеш',
-        'domain': 'Домен',
-        'scans': 'сканирований',
-        'engines': 'движков',
-        'clean': 'чистый',
-        'dangerous': 'опасный',
-        'very_dangerous': 'очень опасный',
-        'suspicious': 'подозрительный',
-        'likely_safe': 'вероятно безопасный',
-        'high_risk': 'высокий риск',
-        'low_risk': 'низкий риск',
-        'threats': 'Угроз',
-        'detected': 'обнаружено',
-        'status': 'Статус',
-        'safe': 'безопасно',
-        'results': 'Результаты',
-        'malicious': 'Вредоносные',
-        'harmless': 'Безвредные',
-        'undetected': 'Не обнаружено',
-        'specify_hash': 'Укажите хеш файла (SHA256 или MD5)',
-        'hash_not_found': 'Неверный формат хеша. Используйте SHA256 (64 символа) или MD5 (32 символа)',
-        'search_results': 'Найдено {count} записей с хешем {hash}:',
-        'and_more': '... и еще {count} записей',
-        'use_full_hash': 'Используйте полный хеш для проверки:\n<code>.vthash [полный_хеш]</code>',
-        'current_language': 'Текущий язык',
-        'available_languages': 'Доступные языки',
-        'russian': 'Русский (по умолчанию)',
-        'english': 'Английский',
-        'current_setting': 'Текущая настройка',
-        'yes_clear': 'Да, очистить',
-        'deleted_entries': 'Удалено записей',
-        'checking_hash': 'Проверка хеша...',
-        'searching_report': 'Поиск отчета по {type} хешу...',
-        'not_found': 'Не найден'
-    },
-    'en': {
-        'name': 'VirusTotal',
-        'no_file': 'Reply to a file',
-        'no_url': 'Specify URL after command',
-        'invalid_url': 'Invalid URL format',
-        'downloading': 'Downloading file...',
-        'uploading': 'Uploading to VirusTotal...',
-        'scanning_url': 'Scanning URL...',
-        'waiting': 'Waiting for analysis',
-        'no_key': 'Set API key in config',
-        'error': 'Error during scanning',
-        'size_limit': 'File is larger than 32MB',
-        'timeout': 'Scan timeout',
-        'view_report': 'Full report',
-        'checking_cache': 'Checking cache...',
-        'getting_results': 'Getting results...',
-        'upload_error': 'Upload error',
-        'scan_error': 'Scan error',
-        'download_error': 'Failed to download file: {error}',
-        'results_title': 'VirusTotal Scan Results',
-        'history_title': 'VirusTotal Scan History',
-        'history_empty': 'Scan history is empty',
-        'history_cleared': 'History cleared',
-        'history_entries': 'Total entries',
-        'clear_history': 'Clear',
-        'hash_check': 'Check by hash',
-        'invalid_history_limit': '❌ Must be integer between 1 and 30',
-        'history_limit_set': '✅ History limit set to',
-        'history_settings': 'History settings',
-        'current_limit': 'Current limit',
-        'entries': 'entries',
-        'delete_entry': 'Delete entry',
-        'entry_deleted': '✅ Entry deleted',
-        'cancel': 'Cancel',
-        'confirm_clear': 'Confirm clear',
-        'clear_all_history': 'Clear all history',
-        'clear_history_confirm': '⚠️ Are you sure you want to clear all history?\nThis action cannot be undone.',
-        'scan_details': 'Scan details',
-        'prev_page': 'Back',
-        'next_page': 'Forward',
-        'page_info': 'Page',
-        'refresh': 'Refresh',
-        'first_page': 'First',
-        'last_page': 'Last',
-        'back_to_results': 'Back',
-        'file': 'File',
-        'url': 'URL',
-        'hash': 'Hash',
-        'domain': 'Domain',
-        'scans': 'scans',
-        'engines': 'engines',
-        'clean': 'clean',
-        'dangerous': 'dangerous',
-        'very_dangerous': 'very dangerous',
-        'suspicious': 'suspicious',
-        'likely_safe': 'likely safe',
-        'high_risk': 'high risk',
-        'low_risk': 'low risk',
-        'threats': 'Threats',
-        'detected': 'detected',
-        'status': 'Status',
-        'safe': 'safe',
-        'results': 'Results',
-        'malicious': 'Malicious',
-        'harmless': 'Harmless',
-        'undetected': 'Undetected',
-        'specify_hash': 'Specify file hash (SHA256 or MD5)',
-        'hash_not_found': 'Invalid hash format. Use SHA256 (64 chars) or MD5 (32 chars)',
-        'search_results': 'Found {count} entries with hash {hash}:',
-        'and_more': '... and {count} more entries',
-        'use_full_hash': 'Use full hash for check:\n<code>.vthash [full_hash]</code>',
-        'current_language': 'Current language',
-        'available_languages': 'Available languages',
-        'russian': 'Russian (default)',
-        'english': 'English',
-        'current_setting': 'Current setting',
-        'yes_clear': 'Yes, clear',
-        'deleted_entries': 'Deleted entries',
-        'checking_hash': 'Checking hash...',
-        'searching_report': 'Searching report by {type} hash...',
-        'not_found': 'Not found'
-    }
-}
+    item_id:str
+    timestamp:datetime
+    scan_type:str
+    name:Optional[str]=None
+    url:Optional[str]=None
+    as_owner:Optional[str]=None
+    country_code:Optional[str]=None
+    stats:ScanStats=field(default_factory=ScanStats)
+    raw_result:dict=field(default_factory=dict)
 
 @loader.tds
 class VirusTotalMod(loader.Module):
+    strings={
+        "name":"VirusTotal",
+        "no_url":"Specify URL, IP or file",
+        "invalid_url":"Invalid URL format",
+        "downloading":"Downloading file...",
+        "uploading":"Uploading to VirusTotal...",
+        "scanning_url":"Scanning URL...",
+        "waiting":"Waiting for analysis",
+        "no_key":"Set API key(s) in config",
+        "error":"Error: {}",
+        "size_limit":"File is larger than 32MB",
+        "timeout":"Scan timeout",
+        "view_report":"Full report",
+        "checking_cache":"Checking cache...",
+        "getting_results":"Getting results...",
+        "upload_error":"Upload error",
+        "scan_error":"Scan error",
+        "download_error":"Failed to download file: {}",
+        "results_title":"VirusTotal Scan Results",
+        "history_title":"VirusTotal Scan History",
+        "history_empty":"Scan history is empty",
+        "history_cleared":"History cleared",
+        "history_entries":"Total entries",
+        "clear_history":"Clear",
+        "hash_check":"Check by hash",
+        "cancel":"Cancel",
+        "confirm_clear":"Confirm clear",
+        "clear_history_confirm":"⚠️ Are you sure you want to clear all history?\nThis action cannot be undone.",
+        "prev_page":"Back",
+        "next_page":"Forward",
+        "refresh":"Refresh",
+        "back_to_results":"Back",
+        "file":"File",
+        "url":"URL",
+        "hash":"Hash",
+        "domain":"Domain",
+        "scans":"scans",
+        "engines":"engines",
+        "clean":"clean",
+        "dangerous":"dangerous",
+        "very_dangerous":"very dangerous",
+        "suspicious":"suspicious",
+        "likely_safe":"likely safe",
+        "high_risk":"high risk",
+        "low_risk":"low risk",
+        "threats":"Threats",
+        "detected":"detected",
+        "status":"Status",
+        "safe":"safe",
+        "results":"Results",
+        "malicious":"Malicious",
+        "harmless":"Harmless",
+        "undetected":"Undetected",
+        "specify_hash":"Specify file hash (SHA256 or MD5)",
+        "hash_not_found":"Invalid hash format",
+        "search_results":"Found {} entries with hash {}:",
+        "and_more":"... and {} more entries",
+        "use_full_hash":"Use full hash for check",
+        "checking_hash":"Checking hash...",
+        "searching_report":"Searching report by {} hash...",
+        "not_found":"Not found",
+        "unknown":"Unknown",
+        "country":"Country",
+        "asn":"ASN",
+        "ip_address":"IP-address",
+        "checking":"Checking",
+        "of":"of",
+        "history":"History",
+        "yes_clear":"Yes, clear",
+        "deleted_entries":"Deleted entries",
+        "bytes":"B",
+        "kb":"KB",
+        "mb":"MB",
+        "gb":"GB",
+        "sec":"sec",
+        "min":"min",
+        "entries":"Entries",
+        "quota_error":"{} VirusTotal daily quota exceeded. Try again tomorrow or add more API keys",
+        "invalid_key_error":"{} Invalid API key. Check your key(s) in config: <code>.cfg VirusTotal api_keys</code>",
+        "rate_limit_error":"{} Too many requests. Please wait {{}} seconds",
+        "not_found_error":"{} Resource not found in VirusTotal database",
+        "server_error":"{} VirusTotal server error ({{}}). Try again later",
+        "network_error":"{} Network error: {{}}",
+        "all_keys_exhausted":"{} All API keys have exhausted their quotas. Add new keys to config",
+    }
+    
+    strings_ru={
+        "name":"VirusTotal",
+        "no_url":"Укажите ссылку, айпи или файл",
+        "invalid_url":"Неверный формат ссылки",
+        "downloading":"Скачиваю файл...",
+        "uploading":"Загружаю на VirusTotal...",
+        "scanning_url":"Сканирую ссылку...",
+        "waiting":"Жду анализа...",
+        "no_key":"Укажите API ключ(и) в конфиге",
+        "error":"Ошибка: {}",
+        "size_limit":"Файл больше 32МБ",
+        "timeout":"Таймаут сканирования",
+        "view_report":"Полный отчёт",
+        "checking_cache":"Проверка кэша...",
+        "getting_results":"Получаю результаты...",
+        "upload_error":"Ошибка загрузки",
+        "scan_error":"Ошибка сканирования",
+        "download_error":"Не удалось скачать файл: {}",
+        "results_title":"Результаты сканирования VirusTotal",
+        "history_title":"История сканирований VirusTotal",
+        "history_empty":"История сканирований пуста",
+        "history_cleared":"История очищена",
+        "history_entries":"Всего записей",
+        "clear_history":"Очистить",
+        "hash_check":"Проверить по хешу",
+        "cancel":"Отмена",
+        "confirm_clear":"Подтвердить очистку",
+        "clear_history_confirm":"⚠️ Вы уверены, что хотите очистить всю историю?\nЭто действие нельзя отменить.",
+        "prev_page":"Назад",
+        "next_page":"Вперед",
+        "refresh":"Обновить",
+        "back_to_results":"Обратно",
+        "file":"Файл",
+        "url":"Ссылка",
+        "hash":"Хеш",
+        "domain":"Домен",
+        "scans":"сканирований",
+        "engines":"движков",
+        "clean":"чистый",
+        "dangerous":"опасный",
+        "very_dangerous":"очень опасный",
+        "suspicious":"подозрительный",
+        "likely_safe":"вероятно безопасный",
+        "high_risk":"высокий риск",
+        "low_risk":"низкий риск",
+        "threats":"Угроз",
+        "detected":"обнаружено",
+        "status":"Статус",
+        "safe":"безопасно",
+        "results":"Результаты",
+        "malicious":"Вредоносные",
+        "harmless":"Безвредные",
+        "undetected":"Не обнаружено",
+        "specify_hash":"Укажите хеш файла (SHA256 или MD5)",
+        "hash_not_found":"Неверный формат хеша",
+        "search_results":"Найдено {} записей с хешем {}:",
+        "and_more":"... и еще {} записей",
+        "use_full_hash":"Используйте полный хеш",
+        "checking_hash":"Проверка хеша...",
+        "searching_report":"Поиск отчета по {} хешу...",
+        "not_found":"Не найден",
+        "unknown":"Неизвестно",
+        "country":"Страна",
+        "asn":"ASN",
+        "ip_address":"IP-адрес",
+        "checking":"Проверяю",
+        "of":"из",
+        "history":"История",
+        "yes_clear":"Да, очистить",
+        "deleted_entries":"Удалено записей",
+        "bytes":"Б",
+        "kb":"КБ",
+        "mb":"МБ",
+        "gb":"ГБ",
+        "sec":"сек",
+        "min":"мин",
+        "entries":"Записи",
+        "quota_error":"{} Превышен дневной лимит запросов VirusTotal. Попробуйте завтра или добавьте ещё API ключей",
+        "invalid_key_error":"{} Неверный API ключ. Проверьте ключ(и) в конфиге: <code>.cfg VirusTotal api_keys</code>",
+        "rate_limit_error":"{} Слишком много запросов. Подождите {{}} секунд",
+        "not_found_error":"{} Ресурс не найден в базе VirusTotal",
+        "server_error":"{} Ошибка сервера VirusTotal ({{}}). Попробуйте позже",
+        "network_error":"{} Сетевая ошибка: {{}}",
+        "all_keys_exhausted":"{} Все API ключи исчерпали лимиты. Добавьте новые ключи в конфиг",
+    }
+
     def __init__(self):
-        self.config = loader.ModuleConfig(
-            loader.ConfigValue(
-                'api_key',
-                None,
-                'VirusTotal API key',
-                validator=loader.validators.Hidden()
-            ),
-            loader.ConfigValue(
-                'max_wait_time',
-                300,
-                'Maximum wait time in seconds',
-                validator=loader.validators.Integer(minimum=60, maximum=600)
-            ),
-            loader.ConfigValue(
-                'poll_interval',
-                10,
-                'Polling interval in seconds',
-                validator=loader.validators.Integer(minimum=5, maximum=30)
-            ),
-            loader.ConfigValue(
-                'save_history',
-                True,
-                'Save scan history',
-                validator=loader.validators.Boolean()
-            ),
-            loader.ConfigValue(
-                'max_history_items',
-                10,
-                'Maximum history entries',
-                validator=loader.validators.Integer(minimum=1, maximum=30)
-            ),
-            loader.ConfigValue(
-                'language',
-                'ru',
-                'Language (ru/en)',
-                validator=loader.validators.Choice(['ru', 'en'])
-            ),
-            loader.ConfigValue(
-                'cleanup_interval',
-                3600,
-                'Interval in seconds to clean old results',
-                validator=loader.validators.Integer(minimum=300, maximum=86400)
-            )
+        self.config=loader.ModuleConfig(
+            loader.ConfigValue('api_keys','','VirusTotal API keys (comma-separated)',validator=loader.validators.Hidden()),
+            loader.ConfigValue('max_wait_time',300,'Maximum wait time',validator=loader.validators.Integer(minimum=60,maximum=600)),
+            loader.ConfigValue('poll_interval',10,'Polling interval',validator=loader.validators.Integer(minimum=5,maximum=10)),
+            loader.ConfigValue('save_history',True,'Save scan history',validator=loader.validators.Boolean()),
+            loader.ConfigValue('max_history_items',10,'Max history entries',validator=loader.validators.Integer(minimum=1,maximum=10)),
+            loader.ConfigValue('cleanup_interval',3600,'Cleanup interval',validator=loader.validators.Integer(minimum=300,maximum=86400))
         )
-        self.api: Optional[VTAPIClient] = None
-        self.history: Optional[HistoryManager] = None
-        self.ui: Optional[UIFormatter] = None
-        self._inline_handlers: Optional[InlineHandlers] = None
-        self.lang = 'ru'
-        self.MAX_SIZE = 32 * 1024 * 1024
-        self._cleanup_task: Optional[asyncio.Task] = None
+        self.history=[]
+        self._session=None
+        self._cleanup_task=None
+        self._result_cache={}
+        self._cache_ttl=300
+        self.api_keys=[]
+        self.key_status={}
+        self.current_key_index=0
+        self.key_lock=asyncio.Lock()
+        self._timeout=aiohttp.ClientTimeout(total=30)
+        self._connector=aiohttp.TCPConnector(limit=20)
 
-    strings = {'name': 'VirusTotal'}
+    def _emoji(self,name:str,premium:bool=True)->str:
+        emojis={
+            'file':('<emoji document_id=5915834902074364776>☁️</emoji>','☁️'),
+            'url':('<emoji document_id=5271604874419647061>🔗</emoji>','🔗'),
+            'size':('<emoji document_id=5784891605601225888>📦</emoji>','📦'),
+            'time':('<emoji document_id=5382194935057372936>⏱️</emoji>','⏱️'),
+            'engines':('<emoji document_id=5195033767969839232>🚀</emoji>','🚀'),
+            'scans':('<emoji document_id=5444965061749644170>👥</emoji>','👥'),
+            'progress':('<emoji document_id=5386367538735104399>⏳</emoji>','⏳'),
+            'refresh':('<emoji document_id=5818740758257077530>🔄</emoji>','🔄'),
+            'stats':('<emoji document_id=5231200819986047254>📊</emoji>','📊'),
+            'shield':('<emoji document_id=5251203410396458957>🛡</emoji>','🛡'),
+            'check':('<emoji document_id=5231012545799666522>🔍</emoji>','🔍'),
+            'success':('<emoji document_id=5206607081334906820>✅️</emoji>','✅'),
+            'error':('<emoji document_id=5210952531676504517>❌️</emoji>','❌'),
+            'warning':('<emoji document_id=5447644880824181073>⚠️</emoji>','⚠️'),
+            'danger':('<emoji document_id=5260293700088511294>⛔️</emoji>','⛔'),
+            'skull':('<emoji document_id=5370842086658546991>☠️</emoji>','☠️'),
+            'history':('<emoji document_id=5197269100878907942>📋</emoji>','📋'),
+            'pages':('<emoji document_id=5253742260054409879>📄</emoji>','📄'),
+            'hash':('<emoji document_id=5343824560523322473>🔢</emoji>','🔢'),
+            'upload':('<emoji document_id=5406745015365943482>⬇️</emoji>','⬇️'),
+            'globe':('<emoji document_id=5447410659077661506>🌐</emoji>','🌐'),
+            'chart':('<emoji document_id=5244837092042750681>📈</emoji>','📈'),
+            'forbidden':('<emoji document_id=5240241223632954241>🚫</emoji>','🚫'),
+            'trash':('<emoji document_id=5445267414562389170>🗑</emoji>','🗑'),
+            'history_empty':('<emoji document_id=5253742260054409879>✉️</emoji>','✉️'),
+            'downloading':('<emoji document_id=5433653135799228968>📥</emoji>','📥'),
+            'waiting':('<emoji document_id=5386367538735104399>⏳</emoji>','⏳'),
+            'timeout':('<emoji document_id=5382194935057372936>⏰</emoji>','⏰'),
+            'not_found':('<emoji document_id=5235750010691271995>❓</emoji>','❓'),
+            'left_arrow':('⬅️','⬅️'),
+            'right_arrow':('➡️','➡️'),
+            'back_arrow':('↩️','↩️'),
+            'link':('🔗','🔗'),
+            'cancel':('🚫','🚫'),
+            'server':('<emoji document_id=5341715473882955310>⚙️</emoji>','⚙️'),
+            'quota':('<emoji document_id=5206492775075295242>💔</emoji>','💔'),
+            'exhausted':('<emoji document_id=5274099962655816924>❗️</emoji>','❗️'),
+        }
+        return emojis[name][0] if premium else emojis[name][1]
 
-    async def client_ready(self, client, db):
-        self._client = client
-        self._db = db
-        self.lang = self.config['language']
-        if self.config['api_key']:
-            self.api = VTAPIClient(self.config['api_key'])
-        self.history = HistoryManager(db, self.config['max_history_items'])
-        self.ui = UIFormatter(self.lang)
-        self._inline_handlers = InlineHandlers(self)
-        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+    def _country_flag(self,country_code:str)->str:
+        if not country_code or len(country_code)!=2:return '🏳️'
+        base=127462
+        return chr(base+(ord(country_code[0].upper())-ord('A')))+chr(base+(ord(country_code[1].upper())-ord('A')))
 
-    async def on_unload(self):
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-        if self.api:
-            await self.api.close()
+    def _format_size(self,size:int)->str:
+        units=[self.strings('bytes'),self.strings('kb'),self.strings('mb'),self.strings('gb')]
+        idx=0
+        while size>=1024 and idx<len(units)-1:
+            size/=1024
+            idx+=1
+        return f"{size:.1f} {units[idx]}" if idx>0 else f"{size:.0f} {units[0]}"
 
-    async def _cleanup_loop(self):
-        interval = self.config['cleanup_interval']
-        while True:
-            await asyncio.sleep(interval)
-            keys = self._db.get(__name__, {}).keys()
-            for key in keys:
-                if key.startswith('result_'):
-                    self._db.set(__name__, key, None)
+    def _format_time(self,seconds:int)->str:
+        if seconds<60:return f"{seconds} {self.strings('sec')}"
+        m,s=divmod(seconds,60)
+        return f"{m} {self.strings('min')} {s} {self.strings('sec')}" if s else f"{m} {self.strings('min')}"
 
-    def get_string(self, key: str, **kwargs) -> str:
-        text = STRINGS[self.lang].get(key, STRINGS['ru'].get(key, key))
-        if kwargs:
+    def _get_status(self,stats:ScanStats)->Tuple[str,str]:
+        if stats.malicious==0 and stats.suspicious==0:
+            return self._emoji('success'),'clean'
+        ratio=stats.malicious/stats.total if stats.total>0 else 0
+        thresholds=[(0.02,'likely_safe','success'),(0.05,'suspicious','warning'),(0.15,'dangerous','danger')]
+        for limit,key,emoji in thresholds:
+            if ratio<limit:return self._emoji(emoji),key
+        return self._emoji('skull'),'very_dangerous'
+
+    def _get_lang(self)->str:
+        try:return self._db.get("hikka.inline","lang","en")
+        except:return "en"
+
+    async def _get_next_key(self)->Optional[str]:
+        async with self.key_lock:
+            if not self.api_keys:return None
+            start=self.current_key_index
+            for i in range(len(self.api_keys)):
+                idx=(start+i)%len(self.api_keys)
+                key=self.api_keys[idx]
+                if self.key_status.get(key,True):
+                    self.current_key_index=(idx+1)%len(self.api_keys)
+                    return key
+            self.key_status.clear()
+            self.current_key_index=0
+            return self.api_keys[0] if self.api_keys else None
+
+    async def _mark_key_bad(self,key:str):
+        async with self.key_lock:
+            self.key_status[key]=False
+            logger.warning(f"Key {key[:8]}... marked as bad")
+
+    _error_map={
+        InvalidKeyError:('shield','invalid_key_error'),
+        QuotaExceededError:('quota','quota_error'),
+        RateLimitError:('progress','rate_limit_error'),
+        NotFoundError:('check','not_found_error'),
+    }
+
+    async def _handle_error(self,e:Exception,context:str="")->str:
+        logger.exception(f"VirusTotal error in {context}: {e}")
+        if isinstance(e,asyncio.TimeoutError):return self.strings("timeout")
+        if isinstance(e,aiohttp.ClientResponseError):
+            if e.status==403:return f"{self._emoji('shield')} {self.strings('invalid_key_error').format(self._emoji('shield'))}"
+            if e.status==429:return f"{self._emoji('progress')} {self.strings('rate_limit_error').format(self._emoji('progress'),e.headers.get('Retry-After','60'))}"
+            if e.status==404:return f"{self._emoji('check')} {self.strings('not_found_error').format(self._emoji('check'))}"
+            if e.status>=500:return f"{self._emoji('server')} {self.strings('server_error').format(self._emoji('server'),e.status)}"
+        if isinstance(e,aiohttp.ClientError):return f"{self._emoji('globe')} {self.strings('network_error').format(self._emoji('globe'),str(e))}"
+        for err,(emoji,key) in self._error_map.items():
+            if isinstance(e,err):return f"{self._emoji(emoji)} {self.strings(key).format(self._emoji(emoji))}"
+        if isinstance(e,VirusTotalError):return f"{self._emoji('exhausted')} {self.strings('all_keys_exhausted').format(self._emoji('exhausted'))}"
+        return self.strings("error").format(str(e))
+
+    async def _check_api_response(self,data:dict)->Optional[Exception]:
+        if not data or 'error' not in data:return None
+        m=data['error'].get('message','').lower()
+        if 'quota' in m or 'exceeded' in m:return QuotaExceededError(m)
+        if 'key' in m:return InvalidKeyError(m)
+        if 'rate' in m or 'too many' in m:return RateLimitError(m)
+        if 'not found' in m:return NotFoundError(m)
+        return VirusTotalError(m)
+
+    async def _request(self,method:str,url:str,**kwargs)->Optional[Dict]:
+        if not self._session or self._session.closed:
+            self._session=aiohttp.ClientSession(timeout=self._timeout,connector=self._connector)
+        max_attempts,base_delay,max_delay=3,2,60
+        last_error=None
+        for attempt in range(max_attempts):
+            api_key=await self._get_next_key()
+            if not api_key:raise VirusTotalError("No API keys available")
+            req_kwargs={**kwargs,"headers":{**kwargs.get("headers",{}),"x-apikey":api_key}}
             try:
-                return text.format(**kwargs)
-            except:
-                return text
-        return text
+                async with self._session.request(method,url,**req_kwargs) as resp:
+                    if resp.status==429:
+                        delay=int(resp.headers.get('Retry-After',min(base_delay*2**attempt,max_delay)))
+                        await self._mark_key_bad(api_key)
+                        await asyncio.sleep(delay)
+                        continue
+                    if resp.status==403:
+                        await self._mark_key_bad(api_key)
+                        raise InvalidKeyError(f"Invalid API key: {api_key[:8]}...")
+                    try:data=await resp.json()
+                    except:data=None
+                    if data:
+                        error=await self._check_api_response(data)
+                        if error:
+                            if isinstance(error,(InvalidKeyError,QuotaExceededError)):await self._mark_key_bad(api_key)
+                            raise error
+                    if resp.status!=200:
+                        if resp.status>=500 and attempt<max_attempts-1:
+                            await asyncio.sleep(min(base_delay*2**attempt,max_delay))
+                            continue
+                        return None
+                    return data
+            except (aiohttp.ClientError,asyncio.TimeoutError) as e:
+                last_error=e
+                if attempt==max_attempts-1:break
+                await asyncio.sleep(min(base_delay*2**attempt,max_delay))
+            except (InvalidKeyError,QuotaExceededError) as e:
+                last_error=e
+                continue
+            except Exception as e:
+                last_error=e
+                break
+        if isinstance(last_error, (InvalidKeyError, QuotaExceededError)):
+            raise VirusTotalError("All API keys exhausted") from last_error
+        elif last_error:
+            raise last_error
+        raise VirusTotalError("All API keys exhausted")
 
-    def _is_valid_ip(self, string: str) -> bool:
+    async def upload_file(self,filename:str,file_bytes:bytes)->Optional[str]:
+        data=aiohttp.FormData()
+        data.add_field('file',file_bytes,filename=filename)
         try:
-            ipaddress.ip_address(string)
-            return True
-        except ValueError:
-            return False
+            r=await self._request('POST','https://www.virustotal.com/api/v3/files',data=data)
+            return r.get('data',{}).get('id') if r else None
+        except Exception as e:logger.error(f"Upload failed: {e}");return None
 
-    def _validate_url(self, url: str) -> Optional[str]:
-        if not url.startswith(('http://', 'https://')):
-            url = 'https://' + url
+    async def get_analysis(self,analysis_id:str)->Optional[Dict]:
+        try:return await self._request('GET',f'https://www.virustotal.com/api/v3/analyses/{analysis_id}')
+        except Exception as e:logger.error(f"Get analysis failed: {e}");return None
+
+    async def get_file_report(self,file_hash:str)->Optional[Dict]:
+        try:return await self._request('GET',f'https://www.virustotal.com/api/v3/files/{file_hash}')
+        except Exception as e:logger.error(f"Get file report failed: {e}");return None
+
+    async def get_url_report(self,url_id:str)->Optional[Dict]:
+        try:return await self._request('GET',f'https://www.virustotal.com/api/v3/urls/{url_id}')
+        except Exception as e:logger.error(f"Get URL report failed: {e}");return None
+
+    async def scan_url(self,url:str)->Optional[Dict]:
+        data=aiohttp.FormData()
+        data.add_field('url',url)
+        try:return await self._request('POST','https://www.virustotal.com/api/v3/urls',data=data)
+        except Exception as e:logger.error(f"Scan URL failed: {e}");return None
+
+    async def get_ip_report(self,ip:str)->Optional[Dict]:
+        try:return await self._request('GET',f'https://www.virustotal.com/api/v3/ip_addresses/{ip}')
+        except Exception as e:logger.error(f"Get IP report failed: {e}");return None
+
+    def _is_valid_ip(self,s:str)->bool:
+        try:ipaddress.ip_address(s);return True
+        except ValueError:return False
+
+    def _validate_url(self,url:str)->Optional[str]:
+        if not url.startswith(('http://','https://')):
+            url='https://'+url
         try:
-            result = urlparse(url)
-            if all([result.scheme, result.netloc]):
+            r=urlparse(url)
+            if r.scheme in ('http','https') and r.netloc:
                 return url
-        except:
-            pass
+        except:pass
         return None
 
-    def _calculate_hash(self, file_path: str) -> str:
-        sha = hashlib.sha256()
-        with open(file_path, 'rb') as f:
-            for block in iter(lambda: f.read(65536), b''):
-                sha.update(block)
-        return sha.hexdigest()
-
-    def _extract_stats(self, data: Dict, scan_type: str) -> ScanStats:
-        stats = ScanStats()
-        attrs = data.get('data', {}).get('attributes', {})
-        if scan_type == 'file':
-            last_stats = attrs.get('last_analysis_stats', {})
-            stats.malicious = last_stats.get('malicious', 0)
-            stats.suspicious = last_stats.get('suspicious', 0)
-            stats.harmless = last_stats.get('harmless', 0)
-            stats.undetected = last_stats.get('undetected', 0)
+    def _extract_stats(self,data:Dict,scan_type:str)->ScanStats:
+        stats=ScanStats()
+        attrs=data.get('data',{}).get('attributes',{})
+        last_stats=attrs.get('last_analysis_stats',{})
+        if last_stats:
+            stats.malicious=last_stats.get('malicious',0)
+            stats.suspicious=last_stats.get('suspicious',0)
+            stats.harmless=last_stats.get('harmless',0)
+            stats.undetected=last_stats.get('undetected',0)
         else:
-            results = attrs.get('last_analysis_results', {})
-            for res in results.values():
-                cat = res.get('category', '')
-                if cat == 'malicious':
-                    stats.malicious += 1
-                elif cat == 'suspicious':
-                    stats.suspicious += 1
-                elif cat == 'harmless':
-                    stats.harmless += 1
-                else:
-                    stats.undetected += 1
+            for r in attrs.get('last_analysis_results',{}).values():
+                cat=r.get('category','')
+                if cat=='malicious':stats.malicious+=1
+                elif cat=='suspicious':stats.suspicious+=1
+                elif cat=='harmless':stats.harmless+=1
+                else:stats.undetected+=1
         return stats
 
-    async def _poll_analysis_loop(self, analysis_id: str) -> Optional[Dict]:
-        while True:
-            result = await self.api.get_analysis(analysis_id)
-            if result and result.get('data', {}).get('attributes', {}).get('status') == 'completed':
-                return result
+    async def _poll_analysis(self,analysis_id:str)->Optional[Dict]:
+        try:return await asyncio.wait_for(self._poll_loop(analysis_id),timeout=self.config['max_wait_time'])
+        except asyncio.TimeoutError:return None
+
+    async def _poll_loop(self,analysis_id:str)->Optional[Dict]:
+        for d in[2,3,5,8,13,21]:
+            r=await self.get_analysis(analysis_id)
+            if r and r.get('data',{}).get('attributes',{}).get('status')=='completed':return r
+            await asyncio.sleep(d)
+        attempts=0
+        while attempts<30:
+            r=await self.get_analysis(analysis_id)
+            if not r:return None
+            if r.get('data',{}).get('attributes',{}).get('status')=='completed':return r
             await asyncio.sleep(self.config['poll_interval'])
+            attempts+=1
+        return None
 
-    async def _poll_analysis(self, analysis_id: str, msg, msg_id: int) -> Optional[Dict]:
-        try:
-            result = await asyncio.wait_for(
-                self._poll_analysis_loop(analysis_id),
-                timeout=self.config['max_wait_time']
-            )
-            return result
-        except asyncio.TimeoutError:
-            return None
-
-    async def _show_results(self, msg, item_id: str, data: Dict, scan_type: str, name: Optional[str] = None, url: Optional[str] = None, scan_time: int = 0, file_size: int = 0):
-        stats = self._extract_stats(data, 'url' if scan_type in ['url', 'ip'] else scan_type)
-        status_emoji, status_key = self.ui.get_status_emoji(stats)
-        total = stats.total
-        safety = round((stats.harmless + stats.undetected) / total * 100, 1) if total > 0 else 0
-        
-        popularity = data.get('data', {}).get('attributes', {}).get('times_submitted', 0)
-
-        if scan_type == 'file':
-            display_name = name or f"{self.get_string('hash')}: {item_id[:16]}..."
-            info = (
-                f"• {self.ui.emoji('file')} <b>{self.get_string('file')}:</b> <code>{display_name}</code>\n"
-                f"• {self.ui.emoji('size')} <code>{self.ui.format_size(file_size) if file_size else ''}</code>\n"
-                f"• {self.ui.emoji('time')} <code>{self.ui.format_time(scan_time)}</code>\n"
-                f"• {self.ui.emoji('engines')} <code>{total} {self.get_string('engines')}</code>\n"
-                f"• {self.ui.emoji('scans')} <code>{popularity} {self.get_string('scans')}</code>"
-            )
-            vt_url = f"https://www.virustotal.com/gui/file/{item_id}"
-        elif scan_type == 'ip':
-            country_code = data.get('data', {}).get('attributes', {}).get('country', '')
-            flag = self.ui.country_flag(country_code)
-            asn = data.get('data', {}).get('attributes', {}).get('asn', '')
-            as_owner = data.get('data', {}).get('attributes', {}).get('as_owner', '')
-            as_text = f"{asn} ({as_owner})" if as_owner else asn
-            info = (
-                f"• {self.ui.emoji('globe')} <b>IP-адрес:</b> <code>{url}</code>\n"
-                f"• {flag} <b>Страна:</b> <code>{country_code or 'Неизвестно'}</code>\n"
-                f"• {self.ui.emoji('stats')} <b>ASN:</b> <code>{as_text}</code>\n"
-                f"• {self.ui.emoji('time')} <code>{self.ui.format_time(scan_time)}</code>\n"
-                f"• {self.ui.emoji('engines')} <code>{total} {self.get_string('engines')}</code>"
-            )
-            vt_url = f"https://www.virustotal.com/gui/ip-address/{item_id}"
+    def _format_result_info(self,scan_type:str,item_id:str,data:dict,**kwargs)->Tuple[str,str,ScanStats]:
+        stats=self._extract_stats(data,'url' if scan_type in['url','ip'] else scan_type)
+        t=stats.total
+        pop=data.get('data',{}).get('attributes',{}).get('times_submitted',0)
+        st=kwargs.get('scan_time',0)
+        url=kwargs.get('url','')
+        if scan_type=='file':
+            is_hash=kwargs.get('is_hash',False)
+            name=kwargs.get('name') or f"{self.strings('hash')}: {item_id[:16]}..."
+            sz=kwargs.get('file_size',0)
+            lbl=self.strings('hash') if is_hash else self.strings('file')
+            info=[f"• {self._emoji('file')} <b>{lbl}:</b> <code>{name}</code>"]
+            if sz:info.append(f"• {self._emoji('size')} <code>{self._format_size(sz)}</code>")
+            info+=[f"• {self._emoji('time')} <code>{self._format_time(st)}</code>",f"• {self._emoji('engines')} <code>{t} {self.strings('engines')}</code>",f"• {self._emoji('scans')} <code>{pop} {self.strings('scans')}</code>"]
+            vt_url=f"https://www.virustotal.com/gui/file/{item_id}"
+        elif scan_type=='ip':
+            a=data.get('data',{}).get('attributes',{})
+            cc=a.get('country','')
+            ao=a.get('as_owner','')
+            asn=a.get('asn','')
+            info=[f"• {self._emoji('globe')} <b>{self.strings('ip_address')}:</b> <code>{url}</code>",f"• {self._country_flag(cc)} <b>{self.strings('country')}:</b> <code>{cc or self.strings('unknown')}</code>"]
+            if ao:info.append(f"• {self._emoji('stats')} <b>{self.strings('asn')}:</b> <code>{asn} ({ao})</code>")
+            else:info.append(f"• {self._emoji('stats')} <b>{self.strings('asn')}:</b> <code>{asn or self.strings('unknown')}</code>")
+            info+=[f"• {self._emoji('time')} <code>{self._format_time(st)}</code>",f"• {self._emoji('engines')} <code>{t} {self.strings('engines')}</code>"]
+            vt_url=f"https://www.virustotal.com/gui/ip-address/{item_id}"
         else:
-            domain = urlparse(url).netloc if url else ''
-            info = (
-                f"• {self.ui.emoji('url')} <b>{self.get_string('url')}:</b> <code>{url[:40] + '...' if url and len(url) > 40 else url}</code>\n"
-                f"• {self.ui.emoji('globe')} <b>{self.get_string('domain')}:</b> <code>{domain}</code>\n"
-                f"• {self.ui.emoji('time')} <code>{self.ui.format_time(scan_time)}</code>\n"
-                f"• {self.ui.emoji('engines')} <code>{total} {self.get_string('engines')}</code>\n"
-                f"• {self.ui.emoji('scans')} <code>{popularity} {self.get_string('scans')}</code>"
-            )
-            vt_url = f"https://www.virustotal.com/gui/url/{item_id}"
+            d=urlparse(url).netloc
+            info=[f"• {self._emoji('url')} <b>{self.strings('url')}:</b> <code>{url[:40]+'...' if len(url)>40 else url}</code>",f"• {self._emoji('globe')} <b>{self.strings('domain')}:</b> <code>{d}</code>",f"• {self._emoji('time')} <code>{self._format_time(st)}</code>",f"• {self._emoji('engines')} <code>{t} {self.strings('engines')}</code>",f"• {self._emoji('scans')} <code>{pop} {self.strings('scans')}</code>"]
+            vt_url=f"https://www.virustotal.com/gui/url/{item_id}"
+        return "\n".join(info),vt_url,stats
 
-        text = (
-            f"<b>{self.ui.emoji('shield')} {self.get_string('results_title')}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{info}\n\n"
-            f"{status_emoji} <b>{self.get_string('status')}:</b> <code>{self.get_string(status_key)} ({safety}% {self.get_string('safe')})</code>\n"
-            f"{status_emoji} <b>{self.get_string('threats')}:</b> <code>{stats.malicious} {self.get_string('detected')}</code>\n\n"
-            f"<b>{self.ui.emoji('chart')} {self.get_string('results')}:</b>\n"
-            f"{self.ui.format_stats_block(stats)}"
-        )
+    def _result_buttons(self,vt_url:str,msg_id:int):
+        return[[{"text":f"{self._emoji('link',False)} {self.strings('view_report')}","url":vt_url}],[{"text":f"{self._emoji('history',False)} {self.strings('history')}","callback":self._history_cb,"args":(1,msg_id)}]]
 
-        if self.config['save_history']:
-            if scan_type == 'ip':
-                as_owner = data.get('data', {}).get('attributes', {}).get('as_owner', '')
-                country_code = data.get('data', {}).get('attributes', {}).get('country', '')
-                entry = HistoryEntry(
-                    item_id=item_id,
-                    timestamp=datetime.now(timezone.utc),
-                    scan_type=scan_type,
-                    name=url,
-                    url=url,
-                    as_owner=as_owner,
-                    country_code=country_code,
-                    stats=stats,
-                    raw_result=data
-                )
-            else:
-                entry = HistoryEntry(
-                    item_id=item_id,
-                    timestamp=datetime.now(timezone.utc),
-                    scan_type=scan_type,
-                    name=name,
-                    url=url,
-                    stats=stats,
-                    raw_result=data
-                )
-            self.history.add(entry)
+    def _save_to_history(self,entry:HistoryEntry):
+        if not self.config['save_history']:return
+        self.history.insert(0,entry)
+        if len(self.history)>self.config['max_history_items']:self.history=self.history[:self.config['max_history_items']]
+        self._db.set(__name__,'history',[{'item_id':e.item_id,'timestamp':e.timestamp.isoformat(),'scan_type':e.scan_type,'name':e.name,'url':e.url,'as_owner':e.as_owner,'country_code':e.country_code,'stats':{'malicious':e.stats.malicious,'suspicious':e.stats.suspicious,'harmless':e.stats.harmless,'undetected':e.stats.undetected},'raw_result':e.raw_result} for e in self.history])
 
-        message_id = msg.id if hasattr(msg, 'id') else id(msg)
-        self._db.set(__name__, f"result_{message_id}", {'text': text, 'vt_url': vt_url})
+    def _load_history(self):
+        self.history=[]
+        for i in self._db.get(__name__,'history',[]):
+            try:self.history.append(HistoryEntry(item_id=i['item_id'],timestamp=datetime.fromisoformat(i['timestamp']),scan_type=i['scan_type'],name=i.get('name'),url=i.get('url'),as_owner=i.get('as_owner'),country_code=i.get('country_code'),stats=ScanStats(**i.get('stats',{})),raw_result=i.get('raw_result',{})))
+            except Exception as e:logger.warning(f"Failed to load history entry: {e}")
 
-        buttons = [
-            [{"text": f"{self.ui.emoji('link', premium=False)} {self.get_string('view_report')}", "url": vt_url}],
-            [{"text": f"{self.ui.emoji('history', premium=False)} {'История' if self.lang == 'ru' else 'History'}", "callback": self._inline_handlers.history_callback, "args": (1, message_id)}]
-        ]
+    async def client_ready(self,client,db):
+        self._client=client
+        self._db=db
+        self.api_keys=[k.strip() for k in self.config['api_keys'].split(',') if k.strip()] if self.config['api_keys'] else []
+        if self.api_keys:logger.info(f"Loaded {len(self.api_keys)} API key(s)")
+        else:logger.warning("No API keys loaded from config!")
+        self.key_status.clear()
+        self._load_history()
+        self._cleanup_task=asyncio.create_task(self._cleanup_loop())
 
-        await self.inline.form(text=text, message=msg, reply_markup=buttons, ttl=300)
+    async def on_unload(self):
+        if self._cleanup_task:self._cleanup_task.cancel()
+        if self._session and not self._session.closed:await self._session.close()
+        self._result_cache.clear()
 
-    async def _show_history_page(self, message, page: int = 1, return_id: Optional[int] = None):
-        per_page = 5
-        
-        if not self.history.get_all():
-            text = f"{self.ui.emoji('history_empty')} <b>{self.get_string('history_empty')}</b>"
-            if hasattr(message, 'edit'):
-                await message.edit(text=text, reply_markup=None)
-            else:
-                await utils.answer(message, text)
-            return
-
-        total = len(self.history.get_all())
-        total_pages = (total + per_page - 1) // per_page
-
-        if page < 1:
-            page = 1
-        elif page > total_pages:
-            page = total_pages
-
-        entries = self.history.get_page(page, per_page)
-
-        lines = [
-            f"<b>{self.ui.emoji('history')} {self.get_string('history_title')}</b>",
-            f"━━━━━━━━━━━━━━━━━━━━━━\n",
-            f"<b>{self.ui.emoji('pages')} {'Записи' if self.lang == 'ru' else 'Entries'} {(page-1)*per_page+1}-{min(page*per_page, total)} из {total}</b>\n"
-        ]
-
-        for i, e in enumerate(entries, (page-1)*per_page+1):
-            dt_str = e.timestamp.strftime("%H:%M %d.%m UTC")
-            status_emoji, _ = self.ui.get_status_emoji(e.stats)
-
-            if e.scan_type == 'file':
-                name = e.name or 'Unknown'
-                if len(name) > 25:
-                    name = name[:22] + '...'
-                block_lines = [
-                    f"<b>{i}.</b> {self.ui.emoji('file')} <b>{name}</b>",
-                    f"   {self.ui.emoji('hash')} <code>{e.item_id}</code>",
-                    f"   {self.ui.emoji('time')} <code>{dt_str}</code>",
-                    f"   {status_emoji} <code>{e.stats.malicious}/{e.stats.total}</code>"
-                ]
-                lines.append(f"<blockquote>{chr(10).join(block_lines)}</blockquote>")
-            
-            elif e.scan_type == 'ip':
-                flag = self.ui.country_flag(e.country_code) if e.country_code else '🏳️'
-                display_name = e.as_owner if e.as_owner else e.name or 'Unknown'
-                block_lines = [
-                    f"<b>{i}.</b> {flag} <b>{display_name}</b>",
-                    f"   {self.ui.emoji('url')} <code>{e.url or e.name}</code>",
-                    f"   {self.ui.emoji('time')} <code>{dt_str}</code>",
-                    f"   {status_emoji} <code>{e.stats.malicious}/{e.stats.total}</code>"
-                ]
-                lines.append(f"<blockquote>{chr(10).join(block_lines)}</blockquote>")
-            
-            else:
-                url = e.url or 'Unknown'
-                domain = urlparse(url).netloc if url else ''
-                block_lines = [
-                    f"<b>{i}.</b> {self.ui.emoji('globe')} <b>{domain}</b>",
-                    f"   {self.ui.emoji('url')} <code>{url}</code>",
-                    f"   {self.ui.emoji('time')} <code>{dt_str}</code>",
-                    f"   {status_emoji} <code>{e.stats.malicious}/{e.stats.total}</code>"
-                ]
-                lines.append(f"<blockquote>{chr(10).join(block_lines)}</blockquote>")
-
-        lines.append(f"\n<b>{self.get_string('history_entries')}: {total}/{self.config['max_history_items']}</b>")
-        text = '\n'.join(lines)
-
-        buttons = []
-        nav_row = []
-        if page > 1:
-            nav_row.append({"text": f"{self.ui.emoji('left_arrow', premium=False)} {self.get_string('prev_page')}", "callback": self._inline_handlers.history_callback, "args": (page-1, return_id)})
-        if page < total_pages:
-            nav_row.append({"text": f"{self.get_string('next_page')} {self.ui.emoji('right_arrow', premium=False)}", "callback": self._inline_handlers.history_callback, "args": (page+1, return_id)})
-        if nav_row:
-            buttons.append(nav_row)
-
-        action_row = [
-            {"text": f"{self.ui.emoji('trash', premium=False)} {self.get_string('clear_history')}", "callback": self._inline_handlers.clear_confirm_callback},
-            {"text": f"{self.ui.emoji('refresh', premium=False)} {self.get_string('refresh')}", "callback": self._inline_handlers.history_callback, "args": (page, return_id)}
-        ]
-        if return_id:
-            action_row.append({"text": f"{self.ui.emoji('back_arrow', premium=False)} {self.get_string('back_to_results')}", "callback": self._inline_handlers.return_to_results_callback, "args": (return_id,)})
-        buttons.append(action_row)
-
-        if hasattr(message, 'edit'):
-            await message.edit(text=text, reply_markup=buttons)
-        else:
-            await self.inline.form(text=text, message=message, reply_markup=buttons, ttl=300)
-
-    async def _clear_history_callback(self, call):
-        count = len(self.history.get_all())
-        self.history.clear()
-        text = (
-            f"<b>{self.ui.emoji('trash')} {self.get_string('history_cleared')}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"<b>{self.ui.emoji('success')} {self.get_string('deleted_entries')}: {count}</b>"
-        )
-        buttons = [[{"text": f"{self.ui.emoji('history', premium=False)} {'История' if self.lang == 'ru' else 'History'}", "callback": self._inline_handlers.history_callback, "args": (1, None)}]]
-        await call.edit(text=text, reply_markup=buttons)
-
-    @loader.command(ru_doc="[файл/ссылка/IP] - просканировать файл, ссылку или IP-адрес", en_doc="[file/url/IP] - scan file, URL or IP address")
-    async def vt(self, message):
-        if not self.api:
-            return await utils.answer(message, f"{self.ui.emoji('forbidden')} <b>{self.get_string('no_key')}</b>")
-        
-        reply = await message.get_reply_message()
-        if reply and reply.document:
-            msg = await utils.answer(message, f"<b>{self.ui.emoji('downloading')} {self.get_string('downloading')}</b>")
-            msg_id = id(msg)
-            start = time.time()
-            with tempfile.TemporaryDirectory() as tmp:
-                path = os.path.join(tmp, reply.file.name or 'file.bin')
-                try:
-                    await reply.download_media(path)
-                except Exception as e:
-                    await msg.edit(f"<b>{self.ui.emoji('error')} {self.get_string('download_error', error=str(e))}</b>")
-                    return
-                size = os.path.getsize(path)
-                if size > self.MAX_SIZE:
-                    await msg.edit(f"<b>{self.ui.emoji('forbidden')} {self.get_string('size_limit')}</b>")
-                    return
-                file_hash = self._calculate_hash(path)
-                await msg.edit(f"<b>{self.ui.emoji('check')} {self.get_string('checking_cache')}</b>")
-                existing = await self.api.get_file_report(file_hash)
-                if existing:
-                    await self._show_results(msg, file_hash, existing, 'file', name=reply.file.name, scan_time=int(time.time()-start), file_size=size)
-                    return
-                await msg.edit(f"<b>{self.ui.emoji('upload')} {self.get_string('uploading')}</b>")
-                analysis_id = await self.api.upload_file(path)
-                if not analysis_id:
-                    await msg.edit(f"<b>{self.ui.emoji('error')} {self.get_string('upload_error')}</b>")
-                    return
-                await msg.edit(f"<b>{self.ui.emoji('waiting')} {self.get_string('waiting')}</b>")
-                poll_result = await self._poll_analysis(analysis_id, msg, msg_id)
-                if not poll_result:
-                    await msg.edit(f"<b>{self.ui.emoji('timeout')} {self.get_string('timeout')}</b>")
-                    return
-                final = await self.api.get_file_report(file_hash)
-                await self._show_results(msg, file_hash, final or poll_result, 'file', name=reply.file.name, scan_time=int(time.time()-start), file_size=size)
-            return
-
-        url = None
-        args = utils.get_args_raw(message)
-        if args:
-            url = args.strip()
-        if not url:
-            if reply and reply.text:
-                found = re.findall(r'https?://[^\s"\'<>]+', reply.text)
-                if found:
-                    url = found[0]
-            if not url and message.text:
-                found = re.findall(r'https?://[^\s"\'<>]+', message.text)
-                if found:
-                    url = found[0]
-        if not url:
-            return await utils.answer(message, f"{self.ui.emoji('forbidden')} <b>{self.get_string('no_url')}</b>")
-        
-        url = url.split('"')[0].split('>')[0].split('<')[0]
-
-        if self._is_valid_ip(url):
-            msg = await utils.answer(message, f"<b>{self.ui.emoji('globe')} Проверяю IP {url}...</b>")
-            msg_id = id(msg)
-            start = time.time()
-            report = await self.api.get_ip_report(url)
-            if report:
-                await self._show_results(msg, url, report, 'ip', url=url, scan_time=int(time.time()-start))
-            else:
-                await msg.edit(f"<b>{self.ui.emoji('not_found')} {self.get_string('not_found')}</b>")
-            return
-
-        validated_url = self._validate_url(url)
-        if not validated_url:
-            return await utils.answer(message, f"{self.ui.emoji('error')} <b>{self.get_string('invalid_url')}</b>")
-        
-        url = validated_url
-
-        msg = await utils.answer(message, f"<b>{self.ui.emoji('url')} {self.get_string('scanning_url')}</b>")
-        msg_id = id(msg)
-        start = time.time()
-        url_id = base64.urlsafe_b64encode(url.encode()).decode().strip('=')
-        await msg.edit(f"<b>{self.ui.emoji('check')} {self.get_string('checking_cache')}</b>")
-        existing = await self.api.get_url_report(url_id)
-        if existing:
-            await self._show_results(msg, url_id, existing, 'url', url=url, scan_time=int(time.time()-start))
-            return
-        await msg.edit(f"<b>{self.ui.emoji('waiting')} {self.get_string('waiting')}</b>")
-        scan = await self.api.scan_url(url)
-        if not scan:
-            await msg.edit(f"<b>{self.ui.emoji('error')} {self.get_string('scan_error')}</b>")
-            return
-        analysis_id = scan.get('data', {}).get('id')
-        if not analysis_id:
-            await msg.edit(f"<b>{self.ui.emoji('error')} {self.get_string('scan_error')}</b>")
-            return
-        poll_result = await self._poll_analysis(analysis_id, msg, msg_id)
-        if not poll_result:
-            await msg.edit(f"<b>{self.ui.emoji('timeout')} {self.get_string('timeout')}</b>")
-            return
-        final = await self.api.get_url_report(url_id)
-        await self._show_results(msg, url_id, final or poll_result, 'url', url=url, scan_time=int(time.time()-start))
-
-    @loader.command(ru_doc="[хеш] - проверить по хешу", en_doc="[hash] - check by hash")
-    async def vthash(self, message):
-        if not self.api:
-            return await utils.answer(message, f"{self.ui.emoji('forbidden')} <b>{self.get_string('no_key')}</b>")
-
-        args = utils.get_args_raw(message)
-        if not args:
-            return await utils.answer(message, f"{self.ui.emoji('error')} <b>{self.get_string('specify_hash')}</b>")
-
-        file_hash = args.strip().lower()
-
-        if re.match(r'^[a-f0-9]{64}$', file_hash):
-            hash_type = 'SHA256'
-        elif re.match(r'^[a-f0-9]{32}$', file_hash):
-            hash_type = 'MD5'
-        else:
-            found = self.history.find_by_hash(file_hash)
-            if found:
-                lines = [
-                    f"<b>{self.ui.emoji('check')} {self.get_string('history_search')}</b>\n<code>━━━━━━━━━━━━━━━━━━━━━━</code>\n\n"
-                    f"{self.get_string('search_results', count=len(found), hash=file_hash)}\n"
-                ]
-                for i, e in enumerate(found[:5], 1):
-                    dt_str = e.timestamp.strftime("%H:%M %d.%m UTC")
-                    if e.scan_type == 'ip' and e.as_owner:
-                        flag = self.ui.country_flag(e.country_code) if e.country_code else '🏳️'
-                        name = f"{flag} {e.as_owner}"
+    async def _cleanup_loop(self):
+        while True:
+            await asyncio.sleep(self.config['cleanup_interval'])
+            t=time.time()
+            expired=[k for k,(_,_,ts) in self._result_cache.items() if t-ts>self._cache_ttl]
+            for k in expired:
+                self._result_cache.pop(k,None)
+            for k in list((self._db.get(__name__) or {}).keys()):
+                if k.startswith('result_'):
+                    data=self._db.get(__name__,k)
+                    if data and isinstance(data,dict) and 'timestamp' in data:
+                        if t-data['timestamp']>self._cache_ttl:
+                            self._db.set(__name__,k,None)
                     else:
-                        name = e.name or e.url or 'Unknown'
-                    lines.append(f"{i}. {self.ui.emoji('file') if e.scan_type=='file' else self.ui.emoji('url')} {name[:30]}")
-                    lines.append(f"   {self.ui.emoji('time')} {dt_str}\n")
-                if len(found) > 5:
-                    lines.append(self.get_string('and_more', count=len(found)-5))
-                lines.append(self.get_string('use_full_hash'))
-                return await self.inline.form(
-                    text='\n'.join(lines),
-                    message=message,
-                    reply_markup=[[{
-                        "text": f"{self.ui.emoji('history', premium=False)} {'История' if self.lang=='ru' else 'History'}",
-                        "callback": self._inline_handlers.history_callback,
-                        "args": (1, None)
-                    }]],
-                    ttl=60
-                )
-            return await utils.answer(message, f"{self.ui.emoji('error')} <b>{self.get_string('hash_not_found')}</b>")
+                        self._db.set(__name__,k,None)
 
-        msg = await utils.answer(message, f"<b>{self.ui.emoji('hash')} {self.get_string('checking_hash')}</b>")
-        msg_id = id(msg)
-        start = time.time()
-
-        await msg.edit(f"<b>{self.ui.emoji('check')} {self.get_string('searching_report', type=hash_type)}</b>")
-        report = await self.api.get_file_report(file_hash)
-
-        if report:
-            await self._show_results(msg, file_hash, report, 'file', name=f"{self.get_string('hash')}: {file_hash[:16]}...", scan_time=int(time.time()-start))
-        else:
-            await msg.edit(f"<b>{self.ui.emoji('not_found')} {self.get_string('not_found')}</b>")
-
-    @loader.command(ru_doc="[страница] - показать историю", en_doc="[page] - show history")
-    async def vthistory(self, message):
-        if not self.history.get_all():
-            return await utils.answer(message, f"{self.ui.emoji('history_empty')} <b>{self.get_string('history_empty')}</b>")
-
+    async def _show_results(self,msg,item_id:str,data:dict,scan_type:str,**kwargs):
         try:
-            page = int(utils.get_args_raw(message) or 1)
-        except:
-            page = 1
+            info,vt_url,stats=self._format_result_info(scan_type,item_id,data,**kwargs)
+            se,sk=self._get_status(stats)
+            total=stats.total or 1
+            safe=round((stats.harmless+stats.undetected)/total*100,1)
+            if self.config['save_history']:
+                if scan_type=='ip':
+                    e=HistoryEntry(item_id=item_id,timestamp=datetime.now(timezone.utc),scan_type=scan_type,name=kwargs.get('url'),url=kwargs.get('url'),as_owner=data.get('data',{}).get('attributes',{}).get('as_owner'),country_code=data.get('data',{}).get('attributes',{}).get('country'),stats=stats,raw_result=data)
+                else:
+                    hn=kwargs.get('history_name') or kwargs.get('name') or f"{self.strings('hash')}: {item_id[:16]}..."
+                    e=HistoryEntry(item_id=item_id,timestamp=datetime.now(timezone.utc),scan_type=scan_type,name=hn,url=kwargs.get('url'),stats=stats,raw_result=data)
+                self._save_to_history(e)
+            t=(f"<b>{self._emoji('shield')} {self.strings('results_title')}</b>\n━━━━━━━━━━━━━━━━━━━\n{info}\n\n"
+               f"{se} <b>{self.strings('status')}:</b> <code>{self.strings(sk)} ({safe}% {self.strings('safe')})</code>\n"
+               f"{se} <b>{self.strings('threats')}:</b> <code>{stats.malicious} {self.strings('detected')}</code>\n\n"
+               f"<b>{self._emoji('chart')} {self.strings('results')}:</b>\n"
+               f"<blockquote>🚫<code>{stats.malicious}/{stats.total} ({round(stats.malicious/total*100,1)}%)│{self.strings('malicious')}</code>\n"
+               f"⚠️<code>{stats.suspicious}/{stats.total} ({round(stats.suspicious/total*100,1)}%)│{self.strings('suspicious')}</code>\n"
+               f"{self._emoji('success')}<code>{stats.harmless}/{stats.total} ({round(stats.harmless/total*100,1)}%)│{self.strings('harmless')}</code>\n"
+               f"👁️<code>{stats.undetected}/{stats.total} ({round(stats.undetected/total*100,1)}%)│{self.strings('undetected')}</code></blockquote>")
+            mid=msg.id if hasattr(msg,'id') else id(msg)
+            self._result_cache[mid]=(t,vt_url,time.time())
+            self._db.set(__name__,f"result_{mid}",{'text':t,'vt_url':vt_url,'timestamp':time.time()})
+            await self.inline.form(text=t,message=msg,reply_markup=self._result_buttons(vt_url,mid),ttl=300)
+        except Exception as e:
+            await utils.answer(msg,await self._handle_error(e,"show_results"))
 
-        await self._show_history_page(message, page)
-
-    @loader.command(ru_doc=" - очистить историю", en_doc=" - clear history")
-    async def vtclear(self, message):
-        count = len(self.history.get_all())
-        if count == 0:
-            return await utils.answer(message, f"{self.ui.emoji('history_empty')} <b>{self.get_string('history_empty')}</b>")
-
-        self.history.clear()
-        await utils.answer(message, f"{self.ui.emoji('trash')} <b>{self.get_string('history_cleared')}</b>. {self.ui.emoji('success')} <b>{self.get_string('deleted_entries')}: {count}</b>")
-
-    @loader.command(ru_doc=" - сменить язык", en_doc=" - change language")
-    async def vtlang(self, message):
-        args = utils.get_args_raw(message)
-
-        if not args:
-            text = (
-                f"<b>{self.ui.emoji('globe')} {self.get_string('current_language')}: {'Русский' if self.lang=='ru' else 'English'}</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"<b>{self.get_string('available_languages')}:</b>\n"
-                f"• <code>.vtlang ru</code> - {self.get_string('russian')}\n"
-                f"• <code>.vtlang en</code> - {self.get_string('english')}\n\n"
-                f"<b>{self.get_string('current_setting')}:</b>\n"
-                f"language: {self.config['language']}"
-            )
-            await self.inline.form(
-                text=text,
-                message=message,
-                reply_markup=[[
-                    {"text": f"{self.ui.emoji('flag_ru', premium=False)} Русский", "callback": self._inline_handlers.change_language_callback, "args": ("ru",)},
-                    {"text": f"{self.ui.emoji('flag_gb', premium=False)} English", "callback": self._inline_handlers.change_language_callback, "args": ("en",)}
-                ]],
-                ttl=60
-            )
+    async def _history_cb(self,call,page:int=1,return_id:Optional[int]=None):
+        if not self.history:
+            t=f"{self._emoji('history_empty')} <b>{self.strings('history_empty')}</b>"
+            if hasattr(call,'inline_message_id'):await call.edit(text=t,reply_markup=None)
+            else:await call.edit(text=t)
             return
+        t=len(self.history)
+        p=(t+HISTORY_PER_PAGE-1)//HISTORY_PER_PAGE
+        page=max(1,min(page,p))
+        s=(page-1)*HISTORY_PER_PAGE
+        e=self.history[s:s+HISTORY_PER_PAGE]
+        l=[f"<b>{self._emoji('history')} {self.strings('history_title')}</b>","━━━━━━━━━━━━━━━━━━━",f"<b>{self._emoji('pages')} {self.strings('entries')} {s+1}-{min(s+HISTORY_PER_PAGE,t)} {self.strings('of')} {t}</b>"]
+        for i,en in enumerate(e,s+1):
+            dt=en.timestamp.strftime("%H:%M %d.%m UTC")
+            se,_=self._get_status(en.stats)
+            if en.scan_type=='file':
+                n=(en.name or self.strings('unknown'))[:25]+('...' if en.name and len(en.name)>25 else '')
+                b=f"<b>{i}.</b> {self._emoji('file')} <b>{n}</b>\n   {self._emoji('hash')} <code>{en.item_id}</code>\n   {self._emoji('time')} <code>{dt}</code>\n   {se} <code>{en.stats.malicious}/{en.stats.total}</code>"
+            elif en.scan_type=='ip':
+                fg=self._country_flag(en.country_code) if en.country_code else '🏳️'
+                n=en.as_owner or en.name or self.strings('unknown')
+                b=f"<b>{i}.</b> {fg} <b>{n}</b>\n   {self._emoji('url')} <code>{en.url or en.name}</code>\n   {self._emoji('time')} <code>{dt}</code>\n   {se} <code>{en.stats.malicious}/{en.stats.total}</code>"
+            else:
+                d=urlparse(en.url or '').netloc or ''
+                b=f"<b>{i}.</b> {self._emoji('globe')} <b>{d}</b>\n   {self._emoji('url')} <code>{en.url or self.strings('unknown')}</code>\n   {self._emoji('time')} <code>{dt}</code>\n   {se} <code>{en.stats.malicious}/{en.stats.total}</code>"
+            l.append(f"<blockquote>{b}</blockquote>")
+        l.append(f"\n<b>{self.strings('history_entries')}: {t}/{self.config['max_history_items']}</b>")
+        txt='\n'.join(l)
+        btns=[]
+        nav=[]
+        if page>1:nav.append({"text":f"{self._emoji('left_arrow',False)} {self.strings('prev_page')}","callback":self._history_cb,"args":(page-1,return_id)})
+        if page<p:nav.append({"text":f"{self.strings('next_page')} {self._emoji('right_arrow',False)}","callback":self._history_cb,"args":(page+1,return_id)})
+        if nav:btns.append(nav)
+        a=[{"text":f"{self._emoji('trash',False)} {self.strings('clear_history')}","callback":self._clear_confirm_cb},{"text":f"{self._emoji('refresh',False)} {self.strings('refresh')}","callback":self._history_cb,"args":(page,return_id)}]
+        if return_id:a.append({"text":f"{self._emoji('back_arrow',False)} {self.strings('back_to_results')}","callback":self._return_cb,"args":(return_id,)})
+        btns.append(a)
+        if hasattr(call,'inline_message_id'):await call.edit(text=txt,reply_markup=btns)
+        else:await self.inline.form(text=txt,message=call,reply_markup=btns,ttl=300)
 
-        lang = args.strip().lower()
-        if lang in ('ru', 'en'):
-            self.config['language'] = lang
-            self.lang = lang
-            self.ui.lang = lang
-            await utils.answer(message, f"{self.ui.emoji('success')} <b>{'Язык изменен на Русский' if lang=='ru' else 'Language changed to English'}</b>")
-        else:
-            await utils.answer(message, f"{self.ui.emoji('error')} <b>{'Неверный язык. Используйте: ru или en' if self.lang=='ru' else 'Invalid language. Use: ru or en'}</b>")
+    async def _clear_confirm_cb(self,call):
+        if not self.history:return await call.answer(self.strings('history_empty'),show_alert=True)
+        t=f"<b>{self._emoji('warning')} {self.strings('confirm_clear')}</b>\n━━━━━━━━━━━━━━━━━━━\n\n{self.strings('clear_history_confirm')}\n<b>{self.strings('entries')}: {len(self.history)}</b>"
+        await call.edit(text=t,reply_markup=[[{"text":f"{self._emoji('success',False)} {self.strings('yes_clear')}","callback":self._clear_cb},{"text":self.strings('cancel'),"callback":self._cancel_cb}]])
+
+    async def _clear_cb(self,call):
+        c=len(self.history)
+        self.history.clear()
+        self._db.set(__name__,'history',[])
+        await call.edit(text=f"<b>{self._emoji('success')} {self.strings('history_cleared')}! {self.strings('deleted_entries')}: {c}</b>",reply_markup=None)
+
+    async def _cancel_cb(self,call):await self._history_cb(call,1)
+
+    async def _return_cb(self,call,msg_id:int):
+        if msg_id in self._result_cache:
+            t,vu,ts=self._result_cache[msg_id]
+            if time.time()-ts<self._cache_ttl:return await call.edit(text=t,reply_markup=self._result_buttons(vu,msg_id))
+        d=self._db.get(__name__,f"result_{msg_id}")
+        if not d:return await call.answer(self.strings('error').format('Result expired'),show_alert=True) or await call.delete()
+        self._result_cache[msg_id]=(d['text'],d['vt_url'],time.time())
+        await call.edit(text=d['text'],reply_markup=self._result_buttons(d['vt_url'],msg_id))
+
+    @loader.command(ru_doc="[файл/ссылка/айпи] - просканировать",en_doc="[file/url/IP] - scan")
+    async def vt(self,message):
+        if not self.api_keys:return await utils.answer(message,f"{self._emoji('forbidden')} <b>{self.strings('no_key')}</b>")
+        r=await message.get_reply_message()
+        if r and r.document:
+            m=await utils.answer(message,f"<b>{self._emoji('downloading')} {self.strings('downloading')}</b>")
+            s=time.time()
+            try:
+                fb=await r.download_media(bytes)
+                sz=len(fb)
+                if sz>MAX_FILE_SIZE:return await m.edit(f"<b>{self._emoji('forbidden')} {self.strings('size_limit')}</b>")
+                fh=hashlib.sha256(fb).hexdigest()
+                await m.edit(f"<b>{self._emoji('check')} {self.strings('checking_cache')}</b>")
+                try:
+                    if ex:=await self.get_file_report(fh):return await self._show_results(m,fh,ex,'file',name=r.file.name,scan_time=int(time.time()-s),file_size=sz,is_hash=False)
+                except Exception as e:
+                    et=await self._handle_error(e,"check_cache")
+                    return await m.edit(et)
+                await m.edit(f"<b>{self._emoji('upload')} {self.strings('uploading')}</b>")
+                try:aid=await self.upload_file(r.file.name or 'file.bin',fb)
+                except Exception as e:
+                    et=await self._handle_error(e,"upload")
+                    return await m.edit(et)
+                if not aid:return await m.edit(f"<b>{self._emoji('error')} {self.strings('upload_error')}</b>")
+                await m.edit(f"<b>{self._emoji('waiting')} {self.strings('waiting')}</b>")
+                try:pr=await self._poll_analysis(aid)
+                except Exception as e:
+                    et=await self._handle_error(e,"poll")
+                    return await m.edit(et)
+                if not pr:return await m.edit(f"<b>{self._emoji('timeout')} {self.strings('timeout')}</b>")
+                try:fn=await self.get_file_report(fh)
+                except Exception as e:
+                    et=await self._handle_error(e,"final_report")
+                    return await m.edit(et)
+                await self._show_results(m,fh,fn or pr,'file',name=r.file.name,scan_time=int(time.time()-s),file_size=sz,is_hash=False)
+            except Exception as e:
+                et=await self._handle_error(e,"file_processing")
+                return await m.edit(et)
+            return
+        t=None
+        a=utils.get_args_raw(message)
+        if a:t=a.strip()
+        if not t and r and r.text:
+            f=re.findall(r'https?://[^\s"\'<>]+',r.text)
+            t=f[0] if f else None
+        if not t:return await utils.answer(message,f"{self._emoji('forbidden')} <b>{self.strings('no_url')}</b>")
+        t=t.split('"')[0].split('>')[0].split('<')[0]
+        if self._is_valid_ip(t):
+            m=await utils.answer(message,f"<b>{self._emoji('globe')} {self.strings('checking')} IP {t}...</b>")
+            s=time.time()
+            try:rp=await self.get_ip_report(t)
+            except Exception as e:
+                et=await self._handle_error(e,"ip_report")
+                return await m.edit(et)
+            if rp:await self._show_results(m,t,rp,'ip',url=t,scan_time=int(time.time()-s))
+            else:await m.edit(f"<b>{self._emoji('not_found')} {self.strings('not_found')}</b>")
+            return
+        u=self._validate_url(t)
+        if not u:return await utils.answer(message,f"{self._emoji('error')} <b>{self.strings('invalid_url')}</b>")
+        m=await utils.answer(message,f"<b>{self._emoji('url')} {self.strings('scanning_url')}</b>")
+        s=time.time()
+        uid=base64.urlsafe_b64encode(u.encode()).decode().strip('=')
+        await m.edit(f"<b>{self._emoji('check')} {self.strings('checking_cache')}</b>")
+        try:
+            if ex:=await self.get_url_report(uid):return await self._show_results(m,uid,ex,'url',url=u,scan_time=int(time.time()-s))
+        except Exception as e:
+            et=await self._handle_error(e,"url_check")
+            return await m.edit(et)
+        await m.edit(f"<b>{self._emoji('waiting')} {self.strings('waiting')}</b>")
+        try:sc=await self.scan_url(u)
+        except Exception as e:
+            et=await self._handle_error(e,"url_scan")
+            return await m.edit(et)
+        if not sc or not (aid:=sc.get('data',{}).get('id')):return await m.edit(f"<b>{self._emoji('error')} {self.strings('scan_error')}</b>")
+        try:pr=await self._poll_analysis(aid)
+        except Exception as e:
+            et=await self._handle_error(e,"url_poll")
+            return await m.edit(et)
+        if not pr:return await m.edit(f"<b>{self._emoji('timeout')} {self.strings('timeout')}</b>")
+        try:fn=await self.get_url_report(uid)
+        except Exception as e:
+            et=await self._handle_error(e,"url_final")
+            return await m.edit(et)
+        await self._show_results(m,uid,fn or pr,'url',url=u,scan_time=int(time.time()-s))
+
+    @loader.command(ru_doc="[хеш] - проверить по хешу",en_doc="[hash] - check by hash")
+    async def vthash(self,message):
+        if not self.api_keys:return await utils.answer(message,f"{self._emoji('forbidden')} <b>{self.strings('no_key')}</b>")
+        a=utils.get_args_raw(message)
+        if not a:return await utils.answer(message,f"{self._emoji('error')} <b>{self.strings('specify_hash')}</b>")
+        fh=a.strip().lower()
+        ht='SHA256' if re.match(r'^[a-f0-9]{64}$',fh) else 'MD5' if re.match(r'^[a-f0-9]{32}$',fh) else None
+        if not ht:
+            fd=[e for e in self.history if fh in e.item_id.lower()]
+            if fd:
+                l=[f"<b>{self._emoji('check')} {self.strings('hash_check')}</b>\n<code>━━━━━━━━━━━━━━━━━━━</code>\n\n{self.strings('search_results').format(len(fd),fh)}\n"]
+                for e in fd[:5]:
+                    dt=e.timestamp.strftime("%H:%M %d.%m UTC")
+                    if e.scan_type=='ip' and e.as_owner:
+                        fl=self._country_flag(e.country_code) if e.country_code else '🏳️'
+                        n=f"{fl} {e.as_owner}"
+                    else:n=e.name or e.url or self.strings('unknown')
+                    l.append(f"• {self._emoji('file') if e.scan_type=='file' else self._emoji('url')} {n[:30]}")
+                    l.append(f"  {self._emoji('time')} {dt}")
+                if len(fd)>5:l.append(self.strings('and_more').format(len(fd)-5))
+                l.append(f"\n{self.strings('use_full_hash')}")
+                return await self.inline.form(text='\n'.join(l),message=message,reply_markup=[[{"text":f"{self._emoji('history',False)} {self.strings('history')}","callback":self._history_cb}]],ttl=60)
+            return await utils.answer(message,f"{self._emoji('error')} <b>{self.strings('hash_not_found')}</b>")
+        m=await utils.answer(message,f"<b>{self._emoji('hash')} {self.strings('checking_hash')}</b>")
+        s=time.time()
+        await m.edit(f"<b>{self._emoji('check')} {self.strings('searching_report').format(ht)}</b>")
+        try:r=await self.get_file_report(fh)
+        except Exception as e:
+            et=await self._handle_error(e,"hash_report")
+            return await m.edit(et)
+        if r:
+            sz=r.get('data',{}).get('attributes',{}).get('size',0)
+            fn=None
+            try:fn=r.get('data',{}).get('attributes',{}).get('meaningful_name')
+            except:pass
+            dn=fh[:16]+"..."
+            hn=fn or f"{self.strings('hash')}: {fh[:16]}..."
+            await self._show_results(m,fh,r,'file',name=dn,history_name=hn,scan_time=int(time.time()-s),file_size=sz,is_hash=True)
+        else:await m.edit(f"<b>{self._emoji('not_found')} {self.strings('not_found')}</b>")
+
+    @loader.command(ru_doc="[страница] - показать историю",en_doc="[page] - show history")
+    async def vthistory(self,message):
+        p=1
+        try:p=int(utils.get_args_raw(message) or 1)
+        except:pass
+        await self._history_cb(message,p)
+
+    @loader.command(ru_doc=" - очистить историю",en_doc=" - clear history")
+    async def vtclear(self,message):
+        if not self.history:return await utils.answer(message,f"{self._emoji('history_empty')} <b>{self.strings('history_empty')}</b>")
+        c=len(self.history)
+        self.history.clear()
+        self._db.set(__name__,'history',[])
+        await utils.answer(message,f"{self._emoji('trash')} <b>{self.strings('history_cleared')}</b>. {self._emoji('success')} <b>{self.strings('deleted_entries')}: {c}</b>")
